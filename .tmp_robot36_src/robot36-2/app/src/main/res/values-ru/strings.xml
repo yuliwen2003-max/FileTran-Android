@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="language">Язык</string>
+	<string name="share">Поделиться</string>
+	<string name="more_options">Ещё</string>
+	<string name="store_scope">Сохранить экран</string>
+	<string name="toggle_mode">Зафиксировать режим</string>
+	<string name="auto_mode">Автоматический</string>
+	<string name="lock_mode">Выбор режима</string>
+	<string name="raw_mode">Без обработки</string>
+	<string name="listening">Слушаю</string>
+	<string name="audio_settings">Настройки аудио</string>
+	<string name="sample_rate">Частота дискретизации</string>
+	<string name="channel_select">Выбор канала</string>
+	<string name="channel_default">Стандартный</string>
+	<string name="channel_first">Первый</string>
+	<string name="channel_second">Второй</string>
+	<string name="channel_summation">Общий</string>
+	<string name="channel_analytic">Анализ</string>
+	<string name="audio_source">Источник аудио</string>
+	<string name="source_default">Стандартный</string>
+	<string name="source_microphone">Микрофон</string>
+	<string name="source_camcorder">Камера</string>
+	<string name="source_voice_recognition">Распознавание голоса</string>
+	<string name="source_unprocessed">Необработанный</string>
+	<string name="audio_format">Аудио формат</string>
+	<string name="fixed_point">Фиксированная точка</string>
+	<string name="floating_point">Плавающая точка</string>
+	<string name="audio_init_failed">Ошибка инициализации аудио</string>
+	<string name="audio_setup_failed">Ошибка настройки аудио</string>
+	<string name="audio_permission_denied">Аудио - отказано в доступе</string>
+	<string name="audio_recording_error">Ошибка записи аудио</string>
+	<string name="creating_picture_directory_failed">Ошибка создания каталога для изображений</string>
+	<string name="creating_picture_file_failed">Ошибка создания файла изображения</string>
+	<string name="storing_picture_failed">Ошибка сохранения изображения</string>
+	<string name="scope_description">Декодированное изображение SSTV</string>
+	<string name="peak_meter_description">Пиковый уровень аудиосигнала</string>
+	<string name="waterfall_plot">Водопадный график</string>
+	<string name="frequency_plot">График частот</string>
+	<string name="spectrogram">Спектрограмма</string>
+	<string name="auto_save">Автосохранение</string>
+	<string name="night_mode">Ночной режим</string>
+	<string name="enable">Включить</string>
+	<string name="disable">Выключить</string>
+	<string name="close">Закрыть</string>
+	<string name="privacy_policy">Политика приватности</string>
+	<string name="privacy_policy_text"><![CDATA[
+<p><h1>Политика приватности</h1></p>
+<p><h5>Доступ к микрофону</h5>
+Это приложение требует доступ к микрофону вашего устройства для декодирования сигналов телевидения с медленной развёрткой (SSTV).
+Микрофон записывает аудио, содержащее передачу SSTV.
+</p>
+<p><h5>Обработка данных</h5>
+Приложение использует небольшой временный буфер в памяти для обработки аудиоданных в реальном времени.
+Этот буфер постоянно перезаписывается новыми данными по мере продвижения декодирования.
+Приложение не сохраняет необработанное аудио, записанное с микрофона.
+На устройстве сохраняются только изображения, полученные в результате декодирования сигнала SSTV.
+</p>
+]]></string>
+	<string name="about">О приложении Robot36</string>
+	<string name="about_text"><![CDATA[
+<p><h1>Robot36 %1$s</h1>Авторские права 2024 Ahmet Inan</p>
+<p>Пожалуйста, ознакомьтесь с ОТКАЗОМ ОТ ОТВЕТСТВЕННОСТИ внизу этой страницы</p>
+<p><h5>Описание</h5>Декодирует изображения телевидения с медленной развёрткой из аудиосигнала</p>
+<p><h5>Реализация</h5><a href="https://github.com/xdsopl/robot36">Robot36 на GitHub</a><br />Лицензия BSD Zero Clause</p>
+<p><h5>Спецификации режимов</h5><a href="http://www.barberdsp.com/downloads/Dayton%%20Paper.pdf">Dayton Paper</a><br />автор JL Barber - 2000</p>
+<p><h5>ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ</h5>%2$s</p>
+]]></string>
+</resources>

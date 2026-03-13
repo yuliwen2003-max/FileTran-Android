@@ -1,0 +1,7 @@
+LOCAL_PATH := $(call my-dir)
+include $(CLEAR_VARS)
+LOCAL_MODULE := hello
+LOCAL_SRC_FILES := hello.c
+LOCAL_MODULE_PATH := $(TARGET_OUT_OPTIONAL_EXECUTABLES)
+include $(BUILD_EXECUTABLE)
+

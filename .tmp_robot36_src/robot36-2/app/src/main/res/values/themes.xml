@@ -1,0 +1,30 @@
+<resources>
+	<!-- Base application theme. -->
+	<style name="Base.Theme.Robot36" parent="Theme.Material3.DayNight">
+		<!-- Primary brand color. -->
+		<item name="colorPrimary">@color/black</item>
+		<item name="colorPrimaryVariant">@color/gray</item>
+		<item name="colorOnPrimary">@color/black</item>
+		<!-- Secondary brand color. -->
+		<item name="colorSecondary">@color/gray</item>
+		<item name="colorSecondaryVariant">@color/white</item>
+		<item name="colorOnSecondary">@color/black</item>
+		<!-- Status bar color. -->
+		<item name="android:statusBarColor">@color/black</item>
+		<!-- Customize your theme here. -->
+		<item name="android:navigationBarColor">@color/dark</item>
+	</style>
+
+	<style name="Theme.AlertDialog" parent="Theme.Material3.DayNight.Dialog.Alert">
+		<!-- Primary brand color. -->
+		<item name="colorPrimary">@color/black</item>
+		<item name="colorPrimaryVariant">@color/gray</item>
+		<item name="colorOnPrimary">@color/black</item>
+		<!-- Secondary brand color. -->
+		<item name="colorSecondary">@color/gray</item>
+		<item name="colorSecondaryVariant">@color/white</item>
+		<item name="colorOnSecondary">@color/black</item>
+	</style>
+
+	<style name="Theme.Robot36" parent="Base.Theme.Robot36" />
+</resources>

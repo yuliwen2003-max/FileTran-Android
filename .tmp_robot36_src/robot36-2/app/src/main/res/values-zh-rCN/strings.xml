@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="language">语言</string>
+	<string name="share">分享</string>
+	<string name="more_options">更多选项</string>
+	<string name="store_scope">保存图像</string>
+	<string name="toggle_mode">切换模式</string>
+	<string name="auto_mode">自动解码</string>
+	<string name="lock_mode">锁定解码模式</string>
+	<string name="raw_mode">原始模式</string>
+	<string name="listening">监听中</string>
+	<string name="audio_settings">音频设置</string>
+	<string name="sample_rate">采样率</string>
+	<string name="channel_select">通道选择</string>
+	<string name="channel_default">默认</string>
+	<string name="channel_first">第一</string>
+	<string name="channel_second">第二</string>
+	<string name="channel_summation">总和</string>
+	<string name="channel_analytic">分析</string>
+	<string name="audio_source">音源</string>
+	<string name="source_default">默认</string>
+	<string name="source_microphone">麦克风</string>
+	<string name="source_camcorder">摄录机</string>
+	<string name="source_voice_recognition">音频识别</string>
+	<string name="source_unprocessed">不处理</string>
+	<string name="audio_format">音频格式</string>
+	<string name="fixed_point">定点数</string>
+	<string name="floating_point">浮点数</string>
+	<string name="audio_init_failed">初始化音频失败</string>
+	<string name="audio_setup_failed">音频设定失败</string>
+	<string name="audio_permission_denied">音频权限被拒绝</string>
+	<string name="audio_recording_error">音频录制出错</string>
+	<string name="creating_picture_directory_failed">创建图片文件夹出错</string>
+	<string name="creating_picture_file_failed">创建图片文件出错</string>
+	<string name="storing_picture_failed">写入图像数据失败</string>
+	<string name="scope_description">解码的SSTV图像</string>
+	<string name="peak_meter_description">音频峰值信号水平</string>
+	<string name="waterfall_plot">瀑布图</string>
+	<string name="frequency_plot">频率图</string>
+	<string name="spectrogram">频谱图</string>
+	<string name="auto_save">自动保存</string>
+	<string name="night_mode">夜间模式</string>
+	<string name="enable">开启</string>
+	<string name="disable">禁用</string>
+	<string name="close">关闭</string>
+	<string name="privacy_policy">隐私策略</string>
+	<string name="privacy_policy_text"><![CDATA[
+<p><h1>隐私政策</h1></p>
+<p><h5>麦克风访问</h5>
+该应用程序需要访问您设备的麦克风，以解码慢扫描电视（SSTV）信号。
+麦克风捕获包含SSTV传输的音频。
+</p>
+<p><h5>数据处理</h5>
+该应用程序使用内存中的小型临时缓冲区来实时处理音频数据。
+随着解码的进行，此缓冲区将不断被新数据覆盖。
+该应用不会存储从麦克风捕获的原始音频。
+仅会保存通过SSTV过程产生的解码图像在您设备的存储空间中。
+</p>
+]]></string>
+	<string name="about">关于Robot36</string>
+	<string name="about_text"><![CDATA[
+<p><h1>Robot36 %1$s</h1>版权所有 © 2024 Ahmet Inan</p>
+<p>请阅读本页面底部的免责声明</p>
+<p><h5>描述</h5>从音频解码慢扫描电视图像</p>
+<p><h5>实现</h5><a href="https://github.com/xdsopl/robot36">Robot36 GitHub</a><br />BSD Zero Clause 许可证</p>
+<p><h5>免责声明</h5>请注意，本应用程序仅用于个人用途。任何商业用途需谨慎考虑。</p>
+<p><h5>模式规范</h5><a href="http://www.barberdsp.com/downloads/Dayton%%20Paper.pdf">Dayton Paper</a><br />作者：JL Barber - 2000年</p>
+<p><h5>免责声明</h5>%2$s</p>
+]]></string>
+</resources>

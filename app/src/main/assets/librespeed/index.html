@@ -1,0 +1,79 @@
+﻿<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Liber Speed Test</title>
+<script src="speedtest.js"></script>
+<style>
+body { margin: 0; font-family: "Segoe UI", sans-serif; background: #f6f7fb; color: #18202a; }
+.wrap { max-width: 760px; margin: 0 auto; padding: 24px 16px 40px; }
+.card { background: #fff; border-radius: 14px; padding: 16px; box-shadow: 0 6px 24px rgba(0,0,0,0.06); }
+h1 { margin: 0 0 6px; font-size: 26px; }
+.desc { margin: 0 0 14px; color: #5f6772; }
+button { border: 0; border-radius: 10px; padding: 10px 18px; font-size: 16px; background: #1e78ff; color: #fff; cursor: pointer; }
+button.stop { background: #d83a3a; }
+.grid { margin-top: 16px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.item { background: #f4f8ff; border-radius: 12px; padding: 12px; }
+.key { font-size: 13px; color: #5f6772; }
+.value { margin-top: 6px; font-size: 24px; font-weight: 700; }
+.sub { margin-top: 6px; font-size: 12px; color: #5f6772; }
+@media (max-width: 520px) { .grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>Liber Speed Test</h1>
+    <p class="desc">Powered by FileTran local speed test server</p>
+    <button id="btn" onclick="toggleTest()">Start Test</button>
+    <div class="sub" id="state">Status: Idle</div>
+    <div class="grid">
+      <div class="item"><div class="key">Download</div><div class="value" id="dl">0.00</div><div class="sub">Mbit/s</div></div>
+      <div class="item"><div class="key">Upload</div><div class="value" id="ul">0.00</div><div class="sub">Mbit/s</div></div>
+      <div class="item"><div class="key">Latency</div><div class="value" id="ping">0.00</div><div class="sub">ms</div></div>
+      <div class="item"><div class="key">Jitter</div><div class="value" id="jit">0.00</div><div class="sub">ms</div></div>
+    </div>
+    <div class="sub" id="ip">IP: -</div>
+  </div>
+</div>
+<script>
+function fmt(n){
+  var v = Number(n || 0);
+  if (v < 10) return v.toFixed(2);
+  if (v < 100) return v.toFixed(1);
+  return v.toFixed(0);
+}
+var s = new Speedtest();
+s.setParameter("telemetry_level", "none");
+s.setParameter("getIp_ispInfo", false);
+s.setParameter("time_dl_max", 8);
+s.setParameter("time_ul_max", 8);
+s.setParameter("count_ping", 10);
+s.onupdate = function (data) {
+  document.getElementById("dl").textContent = fmt(data.dlStatus);
+  document.getElementById("ul").textContent = fmt(data.ulStatus);
+  document.getElementById("ping").textContent = fmt(data.pingStatus);
+  document.getElementById("jit").textContent = fmt(data.jitterStatus);
+  document.getElementById("ip").textContent = "IP: " + (data.clientIp || "-");
+};
+s.onend = function (aborted) {
+  var btn = document.getElementById("btn");
+  btn.className = "";
+  btn.textContent = "Start Test";
+  document.getElementById("state").textContent = aborted ? "Status: Aborted" : "Status: Finished";
+};
+function toggleTest(){
+  var btn = document.getElementById("btn");
+  if (s.getState() === 3){
+    s.abort();
+    return;
+  }
+  btn.className = "stop";
+  btn.textContent = "Stop Test";
+  document.getElementById("state").textContent = "Status: Running";
+  s.start();
+}
+</script>
+</body>
+</html>

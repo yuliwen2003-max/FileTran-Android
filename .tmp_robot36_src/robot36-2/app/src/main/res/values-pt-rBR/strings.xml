@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="language">Idioma</string>
+	<string name="share">Compartilhar</string>
+	<string name="more_options">Mais opções</string>
+	<string name="store_scope">Salvar imagem</string>
+	<string name="toggle_mode">Alternar modo</string>
+	<string name="auto_mode">Modo automático</string>
+	<string name="lock_mode">Modo de bloqueio</string>
+	<string name="raw_mode">Modo Raw</string>
+	<string name="listening">Ouvindo</string>
+	<string name="audio_settings">Configurações de áudio</string>
+	<string name="sample_rate">Taxa de amostragem</string>
+	<string name="channel_select">Selecionar canal</string>
+	<string name="channel_default">Padrão</string>
+	<string name="channel_first">Primeiro</string>
+	<string name="channel_second">Segundo</string>
+	<string name="channel_summation">Somatório</string>
+	<string name="channel_analytic">Analítico</string>
+	<string name="audio_source">Fonte de áudio</string>
+	<string name="source_default">Padrão</string>
+	<string name="source_microphone">Microfone</string>
+	<string name="source_camcorder">Filmadora</string>
+	<string name="source_voice_recognition">Reconhecimento de voz</string>
+	<string name="source_unprocessed">Não processado</string>
+	<string name="audio_format">Formato de Áudio</string>
+	<string name="fixed_point">Ponto Fixo</string>
+	<string name="floating_point">Ponto Flutuante</string>
+	<string name="audio_init_failed">Falha ao iniciar o áudio</string>
+	<string name="audio_setup_failed">Falha na configuração de áudio</string>
+	<string name="audio_permission_denied">Permissão de áudio negada</string>
+	<string name="audio_recording_error">Erro de gravação de áudio</string>
+	<string name="creating_picture_directory_failed">Falha ao criar o diretório de imagem</string>
+	<string name="creating_picture_file_failed">Falha ao criar imagem</string>
+	<string name="storing_picture_failed">Falha ao salvar imagem</string>
+	<string name="scope_description">Imagem SSTV decodificada</string>
+	<string name="peak_meter_description">Nível de sinal de áudio máximo</string>
+	<string name="waterfall_plot">Gráfico de cascata</string>
+	<string name="frequency_plot">Gráfico de frequência</string>
+	<string name="spectrogram">Espectrograma</string>
+	<string name="auto_save">Salvamento automático</string>
+	<string name="night_mode">Modo noturno</string>
+	<string name="enable">Habilitar</string>
+	<string name="disable">Desabilitar</string>
+	<string name="close">Fechar</string>
+	<string name="privacy_policy">Política de privacidade</string>
+	<string name="privacy_policy_text"><![CDATA[
+<p><h1>Política de privacidade</h1></p>
+<p><h5>Acesso ao microfone</h5>
+Este aplicativo requer acesso ao microfone do seu dispositivo para decodificar sinais de televisão de varredura lenta (SSTV).
+O microfone captura o áudio contendo a transmissão SSTV.
+</p>
+<p><h5>Manipulação de dados</h5>
+O aplicativo utiliza um pequeno buffer temporário na memória para processar os dados de áudio em tempo real.
+Este buffer é constantemente sobrescrito com novos dados à medida que a decodificação avança.
+O aplicativo não armazena o áudio bruto capturado pelo microfone.
+Apenas as imagens decodificadas resultantes do processo SSTV são salvas no armazenamento do seu dispositivo.
+</p>
+]]></string>
+	<string name="about">Sobre Robot36</string>
+	<string name="about_text"><![CDATA[
+<p><h1>Robot36 %1$s</h1>Copyright 2024 Ahmet Inan</p>
+<p>Por favor, leia o AVISO no final desta página.</p>
+<p><h5>Descrição</h5>Decodifica imagens de televisão de varredura lenta a partir de áudio</p>
+<p><h5>Código fonte</h5><a href="https://github.com/xdsopl/robot36">Robot36 no GitHub</a><br />BSD Zero Clause License</p>
+<p><h5>Especificação técnica</h5><a href="http://www.barberdsp.com/downloads/Dayton%%20Paper.pdf">Dayton Paper</a><br />por JL Barber - 2000</p>
+<p><h5>AVISO</h5>%2$s</p>
+]]></string>
+</resources>

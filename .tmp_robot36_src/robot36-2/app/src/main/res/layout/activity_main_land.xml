@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+	xmlns:app="http://schemas.android.com/apk/res-auto"
+	xmlns:tools="http://schemas.android.com/tools"
+	android:id="@+id/main"
+	android:layout_width="match_parent"
+	android:layout_height="match_parent"
+	android:keepScreenOn="true"
+	tools:context=".MainActivity">
+
+	<ImageView
+		android:id="@+id/scope"
+		android:layout_width="0dp"
+		android:layout_height="0dp"
+		android:contentDescription="@string/scope_description"
+		app:layout_constraintBottom_toBottomOf="parent"
+		app:layout_constraintEnd_toStartOf="@+id/waterfall_plot"
+		app:layout_constraintStart_toStartOf="parent"
+		app:layout_constraintTop_toTopOf="parent" />
+
+	<ImageView
+		android:id="@+id/waterfall_plot"
+		android:layout_width="0dp"
+		android:layout_height="0dp"
+		android:contentDescription="@string/waterfall_plot"
+		app:layout_constraintBottom_toBottomOf="parent"
+		app:layout_constraintEnd_toStartOf="@+id/peak_meter"
+		app:layout_constraintStart_toEndOf="@+id/scope"
+		app:layout_constraintTop_toTopOf="parent" />
+
+	<ImageView
+		android:id="@+id/peak_meter"
+		android:layout_width="16dp"
+		android:layout_height="0dp"
+		android:contentDescription="@string/peak_meter_description"
+		app:layout_constraintBottom_toBottomOf="parent"
+		app:layout_constraintEnd_toEndOf="parent"
+		app:layout_constraintStart_toEndOf="@+id/waterfall_plot"
+		app:layout_constraintTop_toTopOf="parent" />
+</androidx.constraintlayout.widget.ConstraintLayout>

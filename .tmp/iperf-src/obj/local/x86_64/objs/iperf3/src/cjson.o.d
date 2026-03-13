@@ -1,0 +1,6 @@
+C:\Users\Administrator\AndroidStudioProjects\FileTran\.tmp\iperf-src/obj/local/x86_64/objs/iperf3/src/cjson.o: \
+  C:/Users/Administrator/AndroidStudioProjects/FileTran/.tmp/iperf-src/jni/../iperf-2.2.1/../iperf-3.20/src/cjson.c \
+  C:/Users/Administrator/AndroidStudioProjects/FileTran/.tmp/iperf-src/jni/../iperf-2.2.1/../iperf-3.20/src/iperf_config.h \
+  C:/Users/Administrator/AndroidStudioProjects/FileTran/.tmp/iperf-src/jni/../iperf-2.2.1/../iperf-3.20/src/cjson.h
+C:/Users/Administrator/AndroidStudioProjects/FileTran/.tmp/iperf-src/jni/../iperf-2.2.1/../iperf-3.20/src/iperf_config.h:
+C:/Users/Administrator/AndroidStudioProjects/FileTran/.tmp/iperf-src/jni/../iperf-2.2.1/../iperf-3.20/src/cjson.h:

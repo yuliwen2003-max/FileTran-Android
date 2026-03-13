@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+	xmlns:app="http://schemas.android.com/apk/res-auto"
+	xmlns:tools="http://schemas.android.com/tools"
+	tools:context="xdsopl.robot36.MainActivity">
+	<item
+		android:id="@+id/action_toggle_mode"
+		android:icon="@drawable/baseline_auto_mode_24"
+		android:title="@string/toggle_mode"
+		app:iconTint="@color/tint"
+		app:showAsAction="always" />
+	<item
+		android:id="@+id/action_store_scope"
+		android:icon="@drawable/baseline_save_alt_24"
+		android:title="@string/store_scope"
+		app:iconTint="@color/tint"
+		app:showAsAction="always"
+		tools:ignore="AlwaysShowAction" />
+	<item
+		android:id="@+id/menu_item_share"
+		android:title="@string/share"
+		app:actionProviderClass="androidx.appcompat.widget.ShareActionProvider"
+		app:showAsAction="always" />
+	<item
+		android:icon="@drawable/baseline_menu_24"
+		android:title="@string/more_options"
+		app:iconTint="@color/tint"
+		app:showAsAction="always">
+		<menu>
+			<item
+				android:icon="@drawable/baseline_lock_24"
+				android:title="@string/lock_mode"
+				app:iconTint="@color/tint">
+				<menu>
+					<item android:title="@string/robot_modes">
+						<menu>
+							<item
+								android:id="@+id/action_force_robot36_color"
+								android:title="@string/robot36_color" />
+							<item
+								android:id="@+id/action_force_robot72_color"
+								android:title="@string/robot72_color" />
+						</menu>
+					</item>
+					<item android:title="@string/pd_modes">
+						<menu>
+							<item
+								android:id="@+id/action_force_pd50"
+								android:title="@string/pd50" />
+							<item
+								android:id="@+id/action_force_pd90"
+								android:title="@string/pd90" />
+							<item
+								android:id="@+id/action_force_pd120"
+								android:title="@string/pd120" />
+							<item
+								android:id="@+id/action_force_pd160"
+								android:title="@string/pd160" />
+							<item
+								android:id="@+id/action_force_pd180"
+								android:title="@string/pd180" />
+							<item
+								android:id="@+id/action_force_pd240"
+								android:title="@string/pd240" />
+							<item
+								android:id="@+id/action_force_pd290"
+								android:title="@string/pd290" />
+						</menu>
+					</item>
+					<item android:title="@string/martin_modes">
+						<menu>
+							<item
+								android:id="@+id/action_force_martin1"
+								android:title="@string/martin1" />
+							<item
+								android:id="@+id/action_force_martin2"
+								android:title="@string/martin2" />
+						</menu>
+					</item>
+					<item android:title="@string/scottie_modes">
+						<menu>
+							<item
+								android:id="@+id/action_force_scottie1"
+								android:title="@string/scottie1" />
+							<item
+								android:id="@+id/action_force_scottie2"
+								android:title="@string/scottie2" />
+							<item
+								android:id="@+id/action_force_scottie_dx"
+								android:title="@string/scottie_dx" />
+						</menu>
+					</item>
+					<item android:title="@string/wraase_modes">
+						<menu>
+							<item
+								android:id="@+id/action_force_wraase_sc2_180"
+								android:title="@string/wraase_sc2_180" />
+						</menu>
+					</item>
+					<item android:title="@string/contributed_modes">
+						<menu>
+							<item
+								android:id="@+id/action_force_hffax_mode"
+								android:title="@string/hf_fax" />
+						</menu>
+					</item>
+					<item
+						android:id="@+id/action_force_raw_mode"
+						android:icon="@drawable/baseline_image_not_supported_24"
+						android:title="@string/raw_mode"
+						app:iconTint="@color/tint" />
+					<item
+						android:id="@+id/action_auto_mode"
+						android:icon="@drawable/baseline_auto_mode_24"
+						android:title="@string/auto_mode"
+						app:iconTint="@color/tint" />
+				</menu>
+			</item>
+			<item
+				android:icon="@drawable/baseline_settings_voice_24"
+				android:title="@string/audio_settings"
+				app:iconTint="@color/tint">
+				<menu>
+					<item android:title="@string/sample_rate">
+						<menu>
+							<group android:checkableBehavior="single">
+								<item
+									android:id="@+id/action_set_record_rate_8000"
+									android:title="@string/rate_8000" />
+								<item
+									android:id="@+id/action_set_record_rate_16000"
+									android:title="@string/rate_16000" />
+								<item
+									android:id="@+id/action_set_record_rate_32000"
+									android:title="@string/rate_32000" />
+								<item
+									android:id="@+id/action_set_record_rate_44100"
+									android:title="@string/rate_44100" />
+								<item
+									android:id="@+id/action_set_record_rate_48000"
+									android:title="@string/rate_48000" />
+							</group>
+						</menu>
+					</item>
+					<item android:title="@string/channel_select">
+						<menu>
+							<group android:checkableBehavior="single">
+								<item
+									android:id="@+id/action_set_record_channel_default"
+									android:title="@string/channel_default" />
+								<item
+									android:id="@+id/action_set_record_channel_first"
+									android:title="@string/channel_first" />
+								<item
+									android:id="@+id/action_set_record_channel_second"
+									android:title="@string/channel_second" />
+								<item
+									android:id="@+id/action_set_record_channel_summation"
+									android:title="@string/channel_summation" />
+								<item
+									android:id="@+id/action_set_record_channel_analytic"
+									android:title="@string/channel_analytic" />
+							</group>
+						</menu>
+					</item>
+					<item android:title="@string/audio_source">
+						<menu>
+							<group android:checkableBehavior="single">
+								<item
+									android:id="@+id/action_set_source_default"
+									android:title="@string/source_default" />
+								<item
+									android:id="@+id/action_set_source_microphone"
+									android:title="@string/source_microphone" />
+								<item
+									android:id="@+id/action_set_source_camcorder"
+									android:title="@string/source_camcorder" />
+								<item
+									android:id="@+id/action_set_source_voice_recognition"
+									android:title="@string/source_voice_recognition" />
+								<item
+									android:id="@+id/action_set_source_unprocessed"
+									android:title="@string/source_unprocessed" />
+							</group>
+						</menu>
+					</item>
+					<item android:title="@string/audio_format">
+						<menu>
+							<group android:checkableBehavior="single">
+								<item
+									android:id="@+id/action_set_floating_point"
+									android:title="@string/floating_point" />
+								<item
+									android:id="@+id/action_set_fixed_point"
+									android:title="@string/fixed_point" />
+							</group>
+						</menu>
+					</item>
+				</menu>
+			</item>
+			<item
+				android:icon="@drawable/baseline_mode_night_24"
+				android:title="@string/night_mode"
+				app:iconTint="@color/tint">
+				<menu>
+					<item
+						android:id="@+id/action_enable_night_mode"
+						android:icon="@drawable/baseline_mode_night_24"
+						android:title="@string/enable"
+						app:iconTint="@color/tint" />
+					<item
+						android:id="@+id/action_disable_night_mode"
+						android:icon="@drawable/baseline_sunny_24"
+						android:title="@string/disable"
+						app:iconTint="@color/tint" />
+				</menu>
+			</item>
+			<item
+				android:icon="@drawable/baseline_water_24"
+				android:title="@string/waterfall_plot"
+				app:iconTint="@color/tint">
+				<menu>
+					<group android:checkableBehavior="single">
+						<item
+							android:id="@+id/action_show_spectrogram"
+							android:title="@string/spectrogram"
+							app:iconTint="@color/tint" />
+						<item
+							android:id="@+id/action_show_frequency_plot"
+							android:title="@string/frequency_plot"
+							app:iconTint="@color/tint" />
+					</group>
+				</menu>
+			</item>
+			<item
+				android:icon="@drawable/baseline_auto_mode_24"
+				android:title="@string/auto_save"
+				app:iconTint="@color/tint">
+				<menu>
+					<group android:checkableBehavior="single">
+						<item
+							android:id="@+id/action_enable_auto_save"
+							android:icon="@drawable/baseline_save_alt_24"
+							android:title="@string/enable"
+							app:iconTint="@color/tint" />
+						<item
+							android:id="@+id/action_disable_auto_save"
+							android:icon="@drawable/outline_scan_delete_24"
+							android:title="@string/disable"
+							app:iconTint="@color/tint" />
+					</group>
+				</menu>
+			</item>
+			<item
+				android:icon="@drawable/baseline_language_24"
+				android:title="@string/language"
+				app:iconTint="@color/tint">
+				<menu>
+					<item
+						android:id="@+id/action_english"
+						android:title="@string/english" />
+					<item
+						android:id="@+id/action_simplified_chinese"
+						android:title="@string/simplified_chinese" />
+					<item
+						android:id="@+id/action_russian"
+						android:title="@string/russian" />
+					<item
+						android:id="@+id/action_german"
+						android:title="@string/german" />
+					<item
+						android:id="@+id/action_brazilian_portuguese"
+						android:title="@string/brazilian_portuguese" />
+					<item
+						android:id="@+id/action_polish"
+						android:title="@string/polish" />
+					<item
+						android:id="@+id/action_ukrainian"
+						android:title="@string/ukrainian" />
+					<item
+						android:id="@+id/action_latin_american_spanish"
+						android:title="@string/latin_american_spanish" />
+					<item
+						android:id="@+id/action_french"
+						android:title="@string/french" />
+				</menu>
+			</item>
+			<item
+				android:id="@+id/action_privacy_policy"
+				android:icon="@drawable/baseline_policy_24"
+				android:title="@string/privacy_policy"
+				app:iconTint="@color/tint" />
+			<item
+				android:id="@+id/action_about"
+				android:icon="@drawable/baseline_info_24"
+				android:title="@string/about"
+				app:iconTint="@color/tint" />
+		</menu>
+	</item>
+</menu>

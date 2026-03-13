@@ -1,0 +1,160 @@
+<UserControl
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="clr-namespace:NatTypeTester.ViewModels;assembly=NatTypeTester.ViewModels"
+    xmlns:designViewModels="clr-namespace:NatTypeTester.Views.DesignViewModels"
+    xmlns:valueConverters="clr-namespace:NatTypeTester.Views.ValueConverters"
+    xmlns:ic="using:FluentIcons.Avalonia"
+    mc:Ignorable="d"
+    d:DesignWidth="380" d:DesignHeight="600"
+    x:Class="NatTypeTester.Views.Views.SettingsView"
+    x:DataType="vm:SettingsViewModel">
+    <Design.DataContext>
+        <designViewModels:DesignSettingsViewModel />
+    </Design.DataContext>
+
+    <UserControl.Styles>
+        <Style Selector="Border.settings-card">
+            <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseMediumLowBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="Padding" Value="10" />
+        </Style>
+        <Style Selector="Border.settings-card > StackPanel">
+            <Setter Property="Spacing" Value="8" />
+        </Style>
+        <Style Selector="TextBlock.section-title">
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="FontSize" Value="14" />
+        </Style>
+    </UserControl.Styles>
+
+    <ScrollViewer>
+        <StackPanel Margin="8" Spacing="10">
+            <!-- Configuration Directory -->
+            <Border Classes="settings-card"
+                    IsVisible="{Binding CanOpenConfigDirectory,Mode=OneTime}">
+                <StackPanel>
+                    <TextBlock x:Name="ConfigDirectoryLabel" Classes="section-title" />
+                    <Button x:Name="OpenConfigDirectoryButton" Command="{Binding OpenConfigDirectoryCommand}"
+                            HorizontalAlignment="Left">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <ic:FluentIcon Icon="Folder" IconVariant="Regular" />
+                            <TextBlock x:Name="OpenConfigDirectoryButtonText" VerticalAlignment="Center" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </Border>
+
+            <!-- Update Settings -->
+            <Border Classes="settings-card">
+                <StackPanel>
+                    <TextBlock x:Name="UpdateLabel" Classes="section-title" />
+
+                    <!-- Version Info and Action Buttons -->
+                    <StackPanel Spacing="8">
+                        <!-- Version Info -->
+                        <StackPanel Spacing="4">
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <TextBlock x:Name="CurrentVersionLabel" />
+                                <TextBlock Text="{Binding CurrentVersion}" />
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Spacing="4"
+                                        IsVisible="{Binding LatestVersion, Converter={x:Static StringConverters.IsNotNullOrEmpty}}">
+                                <TextBlock x:Name="LatestVersionLabel" />
+                                <TextBlock Text="{Binding LatestVersion}" />
+                            </StackPanel>
+                        </StackPanel>
+
+                        <!-- Action Buttons -->
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Button x:Name="CheckUpdateButton" Command="{Binding CheckUpdateCommand}">
+                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                    <ic:FluentIcon Icon="ArrowSync" IconVariant="Color" />
+                                    <TextBlock x:Name="CheckUpdateButtonText" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                            <Button x:Name="OpenHomepageButton" Command="{Binding OpenHomepageCommand}">
+                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                    <ic:FluentIcon Icon="Open" IconVariant="Regular" />
+                                    <TextBlock x:Name="OpenHomepageButtonText" VerticalAlignment="Center" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- Include PreRelease -->
+                    <CheckBox x:Name="IncludePreReleaseCheckBox" IsChecked="{Binding IncludePreRelease}" />
+
+                    <!-- Auto Check Update -->
+                    <CheckBox x:Name="AutoCheckUpdateCheckBox" IsChecked="{Binding AutoCheckUpdate}" />
+
+                    <!-- Check Interval (indented as sub-option) -->
+                    <StackPanel Orientation="Horizontal" Spacing="8" Margin="24,0,0,0"
+                                IsEnabled="{Binding #AutoCheckUpdateCheckBox.IsChecked}">
+                        <TextBlock x:Name="CheckUpdateIntervalLabel" VerticalAlignment="Center" />
+                        <NumericUpDown Value="{Binding CheckUpdateIntervalHours}" Minimum="0.1" Maximum="720"
+                                       Increment="1" FormatString="0.#" Width="90"
+                                       ShowButtonSpinner="False" />
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <!-- Proxy Settings -->
+            <Border Classes="settings-card">
+                <StackPanel>
+                    <TextBlock x:Name="ProxyLabel" Classes="section-title" />
+                    <StackPanel Orientation="Horizontal" Spacing="20">
+                        <RadioButton x:Name="NoProxyRadioButton" GroupName="ProxyType"
+                                     IsChecked="{Binding ProxyType, Converter={x:Static valueConverters:ProxyTypeConverters.PlainConverter}}" />
+                        <RadioButton x:Name="Socks5ProxyRadioButton" GroupName="ProxyType"
+                                     IsChecked="{Binding ProxyType, Converter={x:Static valueConverters:ProxyTypeConverters.Socks5Converter}}" />
+                    </StackPanel>
+
+                    <!-- Proxy Config Grid -->
+                    <StackPanel IsVisible="{Binding ProxyType, Converter={x:Static valueConverters:ProxyTypeConverters.IsSocks5Converter}}" Spacing="8">
+                        <StackPanel Spacing="3">
+                            <TextBlock x:Name="ProxyServerLabel" />
+                            <TextBox Text="{Binding ProxyServer}" />
+                        </StackPanel>
+                        <StackPanel Spacing="3">
+                            <TextBlock x:Name="ProxyUsernameLabel" />
+                            <TextBox Text="{Binding ProxyUser}" />
+                        </StackPanel>
+                        <StackPanel Spacing="3">
+                            <TextBlock x:Name="ProxyPasswordLabel" />
+                            <TextBox Text="{Binding ProxyPassword}" PasswordChar="•" />
+                        </StackPanel>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
+
+            <Border Classes="settings-card">
+                <StackPanel>
+                    <TextBlock x:Name="StunServerListLabel" Classes="section-title" />
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="5">
+                        <TextBox Grid.Column="0" Text="{Binding StunServerListUri}" />
+                        <Button x:Name="LoadStunServerListButton" Grid.Column="1"
+                                Command="{Binding LoadStunServerListCommand}">
+                            <ic:FluentIcon Icon="ArrowDownload" IconVariant="Regular" />
+                        </Button>
+                    </Grid>
+                </StackPanel>
+            </Border>
+
+            <!-- Language Settings -->
+            <Border Classes="settings-card">
+                <StackPanel>
+                    <TextBlock x:Name="LanguageLabel" Classes="section-title" />
+                    <ComboBox ItemsSource="{Binding Languages}"
+                              SelectedItem="{Binding SelectedLanguage}"
+                              DisplayMemberBinding="{Binding DisplayName}"
+                              MinWidth="150" />
+                </StackPanel>
+            </Border>
+        </StackPanel>
+    </ScrollViewer>
+
+</UserControl>

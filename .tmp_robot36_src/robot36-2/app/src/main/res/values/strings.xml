@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="app_name" translatable="false">Robot36</string>
+	<string name="robot_modes" translatable="false">Robot</string>
+	<string name="pd_modes" translatable="false">PD</string>
+	<string name="martin_modes" translatable="false">Martin</string>
+	<string name="scottie_modes" translatable="false">Scottie</string>
+	<string name="wraase_modes" translatable="false">Wraase</string>
+	<string name="contributed_modes" translatable="false">Contrib</string>
+	<string name="robot36_color" translatable="false">Robot 36 Color</string>
+	<string name="robot72_color" translatable="false">Robot 72 Color</string>
+	<string name="pd50" translatable="false">PD 50</string>
+	<string name="pd90" translatable="false">PD 90</string>
+	<string name="pd120" translatable="false">PD 120</string>
+	<string name="pd160" translatable="false">PD 160</string>
+	<string name="pd180" translatable="false">PD 180</string>
+	<string name="pd240" translatable="false">PD 240</string>
+	<string name="pd290" translatable="false">PD 290</string>
+	<string name="martin1" translatable="false">Martin 1</string>
+	<string name="martin2" translatable="false">Martin 2</string>
+	<string name="scottie1" translatable="false">Scottie 1</string>
+	<string name="scottie2" translatable="false">Scottie 2</string>
+	<string name="scottie_dx" translatable="false">Scottie DX</string>
+	<string name="wraase_sc2_180" translatable="false">Wraase SC2–180</string>
+	<string name="hf_fax" translatable="false">HF Fax</string>
+	<string name="rate_8000" translatable="false">8 kHz</string>
+	<string name="rate_16000" translatable="false">16 kHz</string>
+	<string name="rate_32000" translatable="false">32 kHz</string>
+	<string name="rate_44100" translatable="false">44.1 kHz</string>
+	<string name="rate_48000" translatable="false">48 kHz</string>
+	<string name="english" translatable="false">English</string>
+	<string name="simplified_chinese" translatable="false">简体中文</string>
+	<string name="russian" translatable="false">Русский</string>
+	<string name="german" translatable="false">Deutsch</string>
+	<string name="brazilian_portuguese" translatable="false">Português brasileiro</string>
+	<string name="polish" translatable="false">Polski</string>
+	<string name="ukrainian" translatable="false">Українська</string>
+	<string name="latin_american_spanish" translatable="false">Español de América Latina</string>
+	<string name="french" translatable="false">Français</string>
+	<string name="disclaimer" translatable="false">THE SOFTWARE IS PROVIDED \"AS IS\" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.</string>
+	<string name="language">Language</string>
+	<string name="share">Share</string>
+	<string name="more_options">More Options</string>
+	<string name="store_scope">Store Scope</string>
+	<string name="toggle_mode">Toggle Mode</string>
+	<string name="auto_mode">Auto Mode</string>
+	<string name="lock_mode">Lock Mode</string>
+	<string name="raw_mode">Raw Mode</string>
+	<string name="listening">Listening</string>
+	<string name="audio_settings">Audio Settings</string>
+	<string name="sample_rate">Sample Rate</string>
+	<string name="channel_select">Channel Select</string>
+	<string name="channel_default">Default</string>
+	<string name="channel_first">First</string>
+	<string name="channel_second">Second</string>
+	<string name="channel_summation">Summation</string>
+	<string name="channel_analytic">Analytic</string>
+	<string name="audio_source">Audio Source</string>
+	<string name="source_default">Default</string>
+	<string name="source_microphone">Microphone</string>
+	<string name="source_camcorder">Camcorder</string>
+	<string name="source_voice_recognition">Voice Recognition</string>
+	<string name="source_unprocessed">Unprocessed</string>
+	<string name="audio_format">Audio Format</string>
+	<string name="fixed_point">Fixed Point</string>
+	<string name="floating_point">Floating Point</string>
+	<string name="audio_init_failed">Audio init failed</string>
+	<string name="audio_setup_failed">Audio setup failed</string>
+	<string name="audio_permission_denied">Audio permission denied</string>
+	<string name="audio_recording_error">Audio recording error</string>
+	<string name="creating_picture_directory_failed">Creating picture directory failed</string>
+	<string name="creating_picture_file_failed">Creating picture file failed</string>
+	<string name="storing_picture_failed">Storing picture failed</string>
+	<string name="scope_description">Decoded SSTV picture</string>
+	<string name="peak_meter_description">Peak audio signal level</string>
+	<string name="waterfall_plot">Waterfall plot</string>
+	<string name="frequency_plot">Frequency plot</string>
+	<string name="spectrogram">Spectrogram</string>
+	<string name="auto_save">Auto Save</string>
+	<string name="night_mode">Night Mode</string>
+	<string name="enable">Enable</string>
+	<string name="disable">Disable</string>
+	<string name="close">Close</string>
+	<string name="privacy_policy">Privacy Policy</string>
+	<string name="privacy_policy_text"><![CDATA[
+<p><h1>Privacy Policy</h1></p>
+<p><h5>Microphone Access</h5>
+This app requires access to your device\'s microphone to decode Slow Scan Television (SSTV) signals.
+The microphone captures the audio containing the SSTV transmission.
+</p>
+<p><h5>Data Handling</h5>
+The app uses a small temporary buffer in memory to process the audio data in real-time.
+This buffer is constantly overwritten with new data as the decoding progresses.
+The app does not store the raw audio captured from the microphone.
+Only the decoded images resulting from the SSTV process are saved on your device\'s storage.
+</p>
+]]></string>
+	<string name="about">About Robot36</string>
+	<string name="about_text"><![CDATA[
+<p><h1>Robot36 %1$s</h1>Copyright 2024 Ahmet Inan</p>
+<p>Please read DISCLAIMER at the bottom of this page</p>
+<p><h5>Description</h5>Decodes Slow Scan Television images from audio</p>
+<p><h5>Implementation</h5><a href="https://github.com/xdsopl/robot36">Robot36 on GitHub</a><br />BSD Zero Clause License</p>
+<p><h5>Mode specifications</h5><a href="http://www.barberdsp.com/downloads/Dayton%%20Paper.pdf">Dayton Paper</a><br />by JL Barber - 2000</p>
+<p><h5>DISCLAIMER</h5>%2$s</p>
+]]></string>
+</resources>

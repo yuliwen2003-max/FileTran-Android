@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="language">Język</string>
+	<string name="share">Udostępnij</string>
+	<string name="more_options">Więcej opcji</string>
+	<string name="store_scope">Zapisz ekran</string>
+	<string name="toggle_mode">Tryb przełączania</string>
+	<string name="auto_mode">Tryb automatyczny</string>
+	<string name="lock_mode">Zablokuj tryb</string>
+	<string name="raw_mode">Tryb surowy (RAW)</string>
+	<string name="listening">Słuchanie</string>
+	<string name="audio_settings">Ustawienia dźwięku</string>
+	<string name="sample_rate">Częstotliwość próbkowania</string>
+	<string name="channel_select">Wybór kanału</string>
+	<string name="channel_default">Domyślny</string>
+	<string name="channel_first">Pierwszy</string>
+	<string name="channel_second">Drugi</string>
+	<string name="channel_summation">Sumarycznie</string>
+	<string name="channel_analytic">Analitycznie</string>
+	<string name="audio_source">Źródło dźwięku</string>
+	<string name="source_default">Domyślne</string>
+	<string name="source_microphone">Mikrofon</string>
+	<string name="source_camcorder">Kamera</string>
+	<string name="source_voice_recognition">Rozpoznawanie głosu</string>
+	<string name="source_unprocessed">Nieprzetworzone</string>
+	<string name="audio_format">Format dźwięku</string>
+	<string name="fixed_point">Stałoprzecinkowy</string>
+	<string name="floating_point">Zmiennoprzecinkowy</string>
+	<string name="audio_init_failed">Inicjowanie dźwięku nie powiodło się</string>
+	<string name="audio_setup_failed">Konfiguracja dźwięku nie powiodła się</string>
+	<string name="audio_permission_denied">Odmowa dostępu do dźwięku</string>
+	<string name="audio_recording_error">Błąd nagrywania dźwięku</string>
+	<string name="creating_picture_directory_failed">Tworzenie katalogu obrazów nie powiodło się</string>
+	<string name="creating_picture_file_failed">Tworzenie pliku obrazu nie powiodło się</string>
+	<string name="storing_picture_failed">Zapisywanie obrazu nie powiodło się</string>
+	<string name="scope_description">Zdekodowano obraz SSTV</string>
+	<string name="peak_meter_description">Szczytowy poziom sygnału audio</string>
+	<string name="waterfall_plot">Wykres wodospadowy</string>
+	<string name="frequency_plot">Wykres częstotliwości</string>
+	<string name="spectrogram">Spektrogram</string>
+	<string name="auto_save">Automatyczne zapisywanie</string>
+	<string name="night_mode">Tryb nocny</string>
+	<string name="enable">Włącz</string>
+	<string name="disable">Wyłącz</string>
+	<string name="close">Zamknij</string>
+	<string name="privacy_policy">Polityka prywatności</string>
+	<string name="privacy_policy_text"><![CDATA[
+<p><h1>Polityka prywatności</h1></p>
+<p><h5>Dostęp do mikrofonu</h5>
+Ta aplikacja wymaga dostępu do mikrofonu urządzenia, aby dekodować sygnały telewizji o wolnym skanowaniu (SSTV).
+Mikrofon przechwytuje dźwięk zawierający transmisję SSTV.
+</p>
+<p><h5>Obchodzenie się z danymi</h5>
+Aplikacja wykorzystuje mały tymczasowy bufor w pamięci do przetwarzania danych audio w czasie rzeczywistym.
+W miarę postępu dekodowania bufor ten jest stale nadpisywany nowymi danymi.
+Aplikacja nie przechowuje nieprzetworzonego dźwięku przechwyconego z mikrofonu.
+Tylko zdekodowane obrazy powstałe w procesie dekodowania SSTV są zapisywane do pamięci twojego urządzenia.
+</p>
+]]></string>
+	<string name="about">O Robot36</string>
+	<string name="about_text"><![CDATA[
+<p><h1>Robot36 %1$s</h1>Prawa autorskie 2024 Ahmet Inan</p>
+<p>Przeczytaj ZASTRZEŻENIA na dole tej strony</p>
+<p><h5>Opis</h5>Dekodowanie sygnałów telewizji o wolnym skanowaniu (SSTV) z dźwięku</p>
+<p><h5>Implementacja</h5><a href="https://github.com/xdsopl/robot36">Robot36 na GitHub</a><br />BSD Zero Clause License</p>
+<p><h5>Specyfikacje trybów</h5><a href="http://www.barberdsp.com/downloads/Dayton%%20Paper.pdf">Dayton Paper</a><br />by JL Barber - 2000</p>
+<p><h5>ZASTRZEŻENIA</h5>%2$s</p>
+]]></string>
+</resources>

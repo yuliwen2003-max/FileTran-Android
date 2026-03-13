@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string name="language">Мова</string>
+	<string name="share">Поділитись</string>
+	<string name="more_options">Більше</string>
+	<string name="store_scope">Зберегти екран</string>
+	<string name="toggle_mode">Зафіксувати режим</string>
+	<string name="auto_mode">Автоматичний</string>
+	<string name="lock_mode">Вибір режиму</string>
+	<string name="raw_mode">Без обробок</string>
+	<string name="listening">Слухаю</string>
+	<string name="audio_settings">Параметри аудіо</string>
+	<string name="sample_rate">Частота дискретизації</string>
+	<string name="channel_select">Вибір каналу</string>
+	<string name="channel_default">Стандартний</string>
+	<string name="channel_first">Перший</string>
+	<string name="channel_second">Другий</string>
+	<string name="channel_summation">Спільний</string>
+	<string name="channel_analytic">Аналіз</string>
+	<string name="audio_source">Джерело аудіо</string>
+	<string name="source_default">Стандартний</string>
+	<string name="source_microphone">Мікрофон</string>
+	<string name="source_camcorder">Камера</string>
+	<string name="source_voice_recognition">Розпізнавання голосу</string>
+	<string name="source_unprocessed">Необроблений</string>
+	<string name="audio_format">Формат аудіо</string>
+	<string name="fixed_point">Фіксована точка</string>
+	<string name="floating_point">Плаваюча точка</string>
+	<string name="audio_init_failed">Помилка ініціалізації аудіо</string>
+	<string name="audio_setup_failed">Помилка налаштування аудіо</string>
+	<string name="audio_permission_denied">Аудіо - відмовлено у доступі</string>
+	<string name="audio_recording_error">Помилка запису аудіо</string>
+	<string name="creating_picture_directory_failed">Помилка створення каталогу для зображень</string>
+	<string name="creating_picture_file_failed">Помилка створення файлу зображення</string>
+	<string name="storing_picture_failed">Помилка збереження зображення</string>
+	<string name="scope_description">Декодоване зображення SSTV</string>
+	<string name="peak_meter_description">Піковий рівень аудіосигналу</string>
+	<string name="waterfall_plot">Графік водоспаду</string>
+	<string name="frequency_plot">Графік частот</string>
+	<string name="spectrogram">Спектрограма</string>
+	<string name="auto_save">Автозбереження</string>
+	<string name="night_mode">Нічний режим</string>
+	<string name="enable">Увімкнути</string>
+	<string name="disable">Вимкнути</string>
+	<string name="close">Закрити</string>
+	<string name="privacy_policy">Політика приватності</string>
+	<string name="privacy_policy_text"><![CDATA[
+<p><h1>Політика приватності</h1></p>
+<p><h5>Доступ до мікрофону</h5>
+Ця програма вимагає доступу до мікрофону вашого пристрою для декодування сигналів телебачення з повільною розгорткою (SSTV).
+Мікрофон записує аудіо, що містить передачу SSTV.
+</p>
+<p><h5>Обробка даних</h5>
+Додаток використовує невеликий тимчасовий буфер у пам\'яті для обробки аудіоданих у реальному часі.
+Цей буфер постійно перезаписується новими даними у міру просування декодування.
+Програма не зберігає необроблене аудіо, записане з мікрофона.
+На пристрої зберігаються лише зображення, отримані внаслідок декодування сигналу SSTV.
+</p>
+]]></string>
+	<string name="about">Про застосунок Robot36</string>
+	<string name="about_text"><![CDATA[
+<p><h1>Robot36 %1$s</h1>Авторські права 2024 Ahmet Inan</p>
+<p>Будь ласка, ознайомтеся з ВІДМОВОЮ ВІД ВІДПОВІДАЛЬНОСТІ внизу цієї сторінки</p>
+<p><h5>Опис</h5>Декодує зображення телебачення з повільною розгорткою з аудіосигналу</p>
+<p><h5>Реалізація</h5><a href="https://github.com/xdsopl/robot36">Robot36 на Ґітхаб</a><br />Ліцензія BSD Zero Clause</p>
+<p><h5>Специфікації режимів</h5><a href="http://www.barberdsp.com/downloads/Dayton%%20Paper.pdf">Dayton Paper</a><br />автор JL Barber - 2000</p>
+<p><h5>ВІДМОВА ВІД ВІДПОВІДАЛЬНОСТІ</h5>%2$s</p>
+]]></string>
+</resources>

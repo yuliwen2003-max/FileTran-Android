@@ -1,0 +1,80 @@
+<UserControl
+    xmlns="https://github.com/avaloniaui"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:vm="clr-namespace:NatTypeTester.ViewModels;assembly=NatTypeTester.ViewModels"
+    xmlns:designViewModels="clr-namespace:NatTypeTester.Views.DesignViewModels"
+    xmlns:valueConverters="clr-namespace:NatTypeTester.Views.ValueConverters"
+    xmlns:ic="using:FluentIcons.Avalonia"
+    mc:Ignorable="d"
+    d:DesignWidth="380" d:DesignHeight="500"
+    x:Class="NatTypeTester.Views.Views.RFC5780View"
+    x:DataType="vm:RFC5780ViewModel">
+    <Design.DataContext>
+        <designViewModels:DesignRFC5780ViewModel />
+    </Design.DataContext>
+
+    <DockPanel>
+        <Border DockPanel.Dock="Bottom"
+                Margin="8,4,8,8"
+                CornerRadius="4">
+            <Button x:Name="TestButton"
+                    Classes="accent"
+                    HorizontalAlignment="Stretch"
+                    Padding="8"
+                    HorizontalContentAlignment="Center"
+                    Command="{Binding DiscoveryNatTypeCommand}">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <ic:FluentIcon Icon="Play" IconVariant="Regular" />
+                    <TextBlock x:Name="TestButtonText" VerticalAlignment="Center" />
+                </StackPanel>
+            </Button>
+        </Border>
+
+        <ScrollViewer>
+            <StackPanel Margin="8" Spacing="8">
+                <StackPanel Orientation="Horizontal" Spacing="10" IsEnabled="{Binding !IsTesting}">
+                    <RadioButton Content="UDP" GroupName="TransportType"
+                                 IsChecked="{Binding TransportType, Converter={x:Static valueConverters:TransportTypeConverters.UdpConverter}}" />
+                    <RadioButton Content="TCP" GroupName="TransportType"
+                                 IsChecked="{Binding TransportType, Converter={x:Static valueConverters:TransportTypeConverters.TcpConverter}}" />
+                    <RadioButton Content="TLS" GroupName="TransportType"
+                                 IsChecked="{Binding TransportType, Converter={x:Static valueConverters:TransportTypeConverters.TlsConverter}}" />
+                </StackPanel>
+
+                <StackPanel Spacing="3">
+                    <TextBlock x:Name="BindingTestLabel" />
+                    <TextBox IsReadOnly="True" Text="{Binding BindingTestResult, Mode=OneWay}" />
+                </StackPanel>
+
+                <StackPanel Spacing="3">
+                    <TextBlock x:Name="MappingBehaviorLabel" />
+                    <TextBox IsReadOnly="True" Text="{Binding MappingBehavior, Mode=OneWay}" />
+                </StackPanel>
+
+                <StackPanel Spacing="3"
+                            IsVisible="{Binding TransportType, Converter={x:Static valueConverters:TransportTypeConverters.UdpConverter}}">
+                    <TextBlock x:Name="FilteringBehaviorLabel" />
+                    <TextBox IsReadOnly="True" Text="{Binding FilteringBehavior, Mode=OneWay}" />
+                </StackPanel>
+
+                <StackPanel Spacing="3" IsEnabled="{Binding !IsTesting}">
+                    <TextBlock x:Name="LocalEndLabel" />
+                    <ComboBox x:Name="LocalEndComboBox" IsEditable="True"
+                              Text="{Binding LocalEnd}"
+                              HorizontalAlignment="Stretch">
+                        <ComboBoxItem Content="0.0.0.0:0" />
+                        <ComboBoxItem Content="[::]:0" />
+                    </ComboBox>
+                </StackPanel>
+
+                <StackPanel Spacing="3">
+                    <TextBlock x:Name="PublicEndLabel" />
+                    <TextBox IsReadOnly="True" Text="{Binding PublicEndPoint, Mode=OneWay}" />
+                </StackPanel>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+
+</UserControl>

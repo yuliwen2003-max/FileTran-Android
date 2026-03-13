@@ -1,0 +1,27 @@
+language: generic
+
+sudo: false
+
+git:
+    quiet: true
+
+branches:
+  only:
+    - master
+
+services:
+  - docker
+
+script:
+  - docker build -t android-ndk:latest .
+  - docker run -d --name android-ndk-container android-ndk
+  - mkdir -p binaries
+  - docker cp -a android-ndk-container:/tmp/libs binaries
+
+deploy:
+  provider: pages
+  skip_cleanup: true
+  github_token: $GITHUB_TOKEN
+  local_dir: binaries
+  on:
+    branch: master
