@@ -1,127 +1,112 @@
-# FileTran - 文件传输应用
+﻿# FileTran Android
 
-## 功能概述
+FileTran 是一个面向 Android 的多通道文件传输应用，目标是在不同网络条件下都能把文件传出去、收回来。
 
-这是一个功能完整的Android文件传输应用，支持通过HTTP服务器和WiFi热点分享文件。
+- 局域网可用时：走 HTTP/二维码快速分享
+- 无网或弱网时：可切换 NFC、声学、AirGap（彩码）等离线方式
+- 实验场景：提供 NAT/UDP/IPv6/测速等网络工具页用于排障与调优
 
-## 主要功能
+## 亮点功能
 
-### 1. 文件传输
-- **选择文件**：从设备中选择任意类型的文件
-- **HTTP服务器**：自动在8080端口启动HTTP服务器
-- **二维码分享**：生成下载链接的二维码，其他设备扫描即可下载
-- **显示URL**：显示完整的下载地址
+- 多协议文件传输
+  - 局域网 HTTP 分享（单文件/多文件）
+  - 文本分享与二维码分享
+  - 反向上传/反向推送能力（实验）
 
-### 2. 文件分享集成
-- **接收分享**：从其他应用（文件管理器、图库等）分享文件到本应用
-- **打开方式**：可作为文件的打开方式选项
-- **自动处理**：接收到文件后自动启动服务器并生成二维码
+- 离线传输能力
+  - NFC + HCE 文件传输
+  - 声学传输（音频编码发送与录音解码接收）
+  - AirGap 视觉码传输（发送/接收）
+  - SSTV（Robot36）图像传输相关能力
 
-### 3. WiFi热点功能
-- **热点配置**：
-  - 自定义热点名称（SSID）
-  - 自定义密码（至少8位）
-  - 选择频段（2.4GHz 或 5GHz）
-  - 随机生成配置
-  
-- **配置管理**：
-  - 自动保存用户自定义的热点配置
-  - 支持重置为随机配置
-  - 记住上次使用的设置
+- 设备协同与效率功能
+  - 剪贴板同步（Clipboard Sync）
+  - 下载历史管理
+  - 已安装 APK 分享
+  - 蓝牙系统分享入口
 
-- **自动开启热点**：
-  - 应用会自动尝试开启热点（需要系统设置权限）
-  - 使用反射API兼容不同Android版本
-  - 如果自动开启失败，会引导用户手动设置
-  - 实时显示热点开启状态
+- 网络与诊断实验室
+  - NAT 类型探测
+  - UDP 传输实验（IPv4/IPv6）
+  - NAT 打洞实验（含 NAT3/4 场景探索）
+  - iPerf / LibreSpeed / SpeedTest 等测速相关页面
+  - 热点调试与信息页（含 Wi-Fi 二维码）
 
-- **WiFi二维码**：
-  - 生成WiFi连接二维码
-  - 其他设备扫描即可直接连接WiFi
-  - 显示完整的热点信息（SSID、密码、频段）
-  
-- **热点控制**：
-  - 一键停止热点
-  - 实时检测热点状态
+## 技术栈
 
-## 技术实现
+- Kotlin + Jetpack Compose + Material 3
+- NanoHTTPD（内置轻量 HTTP 服务）
+- ZXing（二维码编码/识别相关）
+- CameraX（扫码与视觉采集）
+- OkHttp + dnsjava（网络请求与解析）
+- NDK/C++（`airgap` 模块）
+- OpenCV Android SDK（`airgap/third_party`）
 
-### 核心组件
-1. **FileServer.kt** - NanoHTTPD实现的HTTP文件服务器
-2. **QRCodeGenerator.kt** - ZXing实现的二维码生成器
-3. **NetworkUtils.kt** - 网络工具类，获取本地IP地址
-4. **HotspotManager.kt** - 热点管理器
-5. **HotspotPreferences.kt** - 热点配置持久化
-6. **HotspotDialog.kt** - 热点设置对话框
-7. **HotspotInfoCard.kt** - 热点信息显示卡片
+## 运行环境
 
-### 依赖库
-- NanoHTTPD 2.3.1 - HTTP服务器
-- ZXing Core 3.5.3 - 二维码生成
-- Jetpack Compose - 现代化UI
-- Material 3 - Material Design组件
+- Android `minSdk 24`
+- `targetSdk 36`
+- Kotlin `2.0.21`
+- AGP `8.13.2`
+- JDK `11`
 
-### 权限
-- INTERNET - 网络访问
-- ACCESS_NETWORK_STATE - 网络状态
-- ACCESS_WIFI_STATE - WiFi状态
-- CHANGE_WIFI_STATE - 修改WiFi状态
-- ACCESS_FINE_LOCATION - 精确定位（WiFi扫描需要）
-- ACCESS_COARSE_LOCATION - 粗略定位
-- NEARBY_WIFI_DEVICES - 附近WiFi设备
-- WRITE_SETTINGS - 修改系统设置（用于自动开启热点）
-- READ_EXTERNAL_STORAGE - 读取文件
+## 项目结构
 
-## 使用流程
+```text
+FileTran/
+├─ app/                    # 主应用模块（UI、传输逻辑、页面）
+├─ airgap/                 # AirGap 原生与解码能力（含 C++/OpenCV）
+├─ gradle/                 # 版本目录与构建配置
+├─ HOTSPOT_DEBUG.md        # 热点调试说明
+└─ THIRD_PARTY_NOTICES.md  # 第三方许可说明
+```
 
-### 文件传输
-1. 打开应用
-2. 点击"选择文件"按钮
-3. 选择要分享的文件
-4. 应用自动生成二维码和下载链接
-5. 其他设备扫描二维码或访问链接下载文件
+## 快速开始
 
-### 从其他应用分享
-1. 在文件管理器/图库中选择文件
-2. 点击"分享"按钮
-3. 选择"FileTran"应用
-4. 自动生成二维码和下载链接
+### 1) Android Studio
 
-### 开启热点
-1. 在主界面点击"开启热点"按钮
-2. 配置热点信息：
-   - 输入SSID和密码，或点击"随机生成"
-   - 选择频段（2.4GHz或5GHz）
-   - 可选：点击"生成WiFi二维码"预览
-3. 如果首次使用，需要授予"修改系统设置"权限
-4. 点击"开启热点"
-5. 应用会自动尝试开启热点
-6. 如果自动开启成功，会显示"热点已开启"状态
-7. 如果自动开启失败，系统会跳转到WiFi设置页面，需要手动开启
-8. 查看热点信息和WiFi二维码
-9. 可以点击"停止热点"按钮关闭热点
+1. 使用 Android Studio 打开项目根目录。
+2. 等待 Gradle Sync 完成。
+3. 连接真机（推荐，涉及 NFC/音频/热点等硬件能力）。
+4. 运行 `app` 模块。
 
-## 注意事项
+### 2) 命令行构建
 
-1. **热点自动开启**：
-   - 应用使用反射API尝试自动开启热点
-   - 需要授予"修改系统设置"权限
-   - 在某些设备和Android版本上可能无法自动开启
-   - 如果自动开启失败，会引导用户手动设置
-   
-2. **网络要求**：文件传输需要设备在同一局域网内
+```bash
+./gradlew assembleDebug
+```
 
-3. **端口占用**：确保8080端口未被其他应用占用
+Windows:
 
-4. **文件权限**：首次使用需要授予文件读取权限
+```powershell
+.\gradlew.bat assembleDebug
+```
 
-5. **兼容性**：热点功能在不同厂商的设备上表现可能不同
+## 常用权限说明
 
-## 界面特点
+应用包含多种传输模式，因此会申请较多权限，核心包括：
 
-- 现代化Material 3设计
-- 清晰的视觉层次
-- 直观的操作流程
-- 响应式布局
-- 友好的错误提示
+- 网络/热点：`INTERNET`、`ACCESS_WIFI_STATE`、`CHANGE_WIFI_STATE`
+- 媒体与文件：`READ_MEDIA_*`、`READ_EXTERNAL_STORAGE`（旧版本）
+- 扫码与音频：`CAMERA`、`RECORD_AUDIO`
+- 蓝牙/NFC：`BLUETOOTH_*`、`NFC`
+- 前台服务：`FOREGROUND_SERVICE*`
 
+实际授权请按你开启的功能按需授予。
+
+## 发布建议（重要）
+
+当前仓库包含较大的第三方二进制文件（OpenCV/AirGap 相关），推送 GitHub 时可能触发大文件限制。
+
+建议在发布前执行以下策略之一：
+
+- 使用 Git LFS 管理大二进制文件
+- 将超大依赖改为“构建时下载”而不是直接入库
+- 清理不必要的 `.tmp/`、`.cxx/`、构建产物后再提交
+
+## 致谢
+
+- OpenCV
+- ZXing
+- NanoHTTPD
+- 其他依赖见 `THIRD_PARTY_NOTICES.md`
