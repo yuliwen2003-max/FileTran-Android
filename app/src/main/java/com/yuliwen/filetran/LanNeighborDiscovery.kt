@@ -25,9 +25,14 @@ private const val KEY_QR_DEFAULT_PAGE = "qr_default_page"
 private const val KEY_BACKGROUND_ENHANCED = "background_enhanced"
 private const val KEY_BACKGROUND_AUTO_RECEIVE_NO_PROMPT = "background_auto_receive_no_prompt"
 private const val KEY_LOCALSEND_V2_ENABLED = "localsend_v2_enabled"
+private const val KEY_LOCALSEND_V2_ALIAS = "localsend_v2_alias"
+private const val KEY_SHARE_RANDOM_PORT = "share_random_port"
+private const val KEY_SHARE_FIXED_PORT = "share_fixed_port"
 
 private const val DEFAULT_TIMEOUT_SECONDS = 10
 private const val MAX_TIMEOUT_SECONDS = 25
+private const val MAX_LOCALSEND_V2_ALIAS_LENGTH = 64
+const val DEFAULT_SHARE_PORT = 12333
 
 private const val DISCOVERY_PORT = 19443
 private const val MAX_PACKET_SIZE = 16 * 1024
@@ -58,7 +63,10 @@ data class NeighborDiscoverySettings(
     val qrDefaultPage: Int = 0,
     val backgroundEnhanced: Boolean = false,
     val backgroundAutoReceiveNoPrompt: Boolean = false,
-    val localSendV2Enabled: Boolean = true
+    val localSendV2Enabled: Boolean = true,
+    val deviceAlias: String = "",
+    val shareRandomPort: Boolean = true,
+    val shareFixedPort: Int = DEFAULT_SHARE_PORT
 )
 
 object NeighborDiscoverySettingsStore {
@@ -75,7 +83,14 @@ object NeighborDiscoverySettingsStore {
             qrDefaultPage = page,
             backgroundEnhanced = prefs.getBoolean(KEY_BACKGROUND_ENHANCED, false),
             backgroundAutoReceiveNoPrompt = prefs.getBoolean(KEY_BACKGROUND_AUTO_RECEIVE_NO_PROMPT, false),
-            localSendV2Enabled = prefs.getBoolean(KEY_LOCALSEND_V2_ENABLED, true)
+            localSendV2Enabled = prefs.getBoolean(KEY_LOCALSEND_V2_ENABLED, true),
+            deviceAlias = sanitizeDeviceAlias(
+                prefs.getString(KEY_LOCALSEND_V2_ALIAS, "").orEmpty()
+            ),
+            shareRandomPort = prefs.getBoolean(KEY_SHARE_RANDOM_PORT, true),
+            shareFixedPort = sanitizeSharePort(
+                prefs.getInt(KEY_SHARE_FIXED_PORT, DEFAULT_SHARE_PORT)
+            )
         )
     }
 
@@ -128,6 +143,31 @@ object NeighborDiscoverySettingsStore {
             .apply()
     }
 
+    fun setDeviceAlias(context: Context, alias: String) {
+        context.getSharedPreferences(NEIGHBOR_SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(KEY_LOCALSEND_V2_ALIAS, sanitizeDeviceAlias(alias))
+            .apply()
+    }
+
+    fun setLocalSendV2Alias(context: Context, alias: String) {
+        setDeviceAlias(context, alias)
+    }
+
+    fun setShareRandomPort(context: Context, enabled: Boolean) {
+        context.getSharedPreferences(NEIGHBOR_SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(KEY_SHARE_RANDOM_PORT, enabled)
+            .apply()
+    }
+
+    fun setShareFixedPort(context: Context, port: Int) {
+        context.getSharedPreferences(NEIGHBOR_SETTINGS_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(KEY_SHARE_FIXED_PORT, sanitizeSharePort(port))
+            .apply()
+    }
+
     fun registerChangeListener(
         context: Context,
         listener: SharedPreferences.OnSharedPreferenceChangeListener
@@ -135,6 +175,26 @@ object NeighborDiscoverySettingsStore {
         val prefs = context.getSharedPreferences(NEIGHBOR_SETTINGS_PREFS, Context.MODE_PRIVATE)
         prefs.registerOnSharedPreferenceChangeListener(listener)
         return prefs
+    }
+
+    private fun sanitizeDeviceAlias(raw: String): String {
+        val cleaned = buildString(raw.length) {
+            raw.forEach { ch ->
+                when {
+                    ch == '\u0000' -> Unit
+                    ch.isISOControl() -> append(' ')
+                    else -> append(ch)
+                }
+            }
+        }
+        return cleaned
+            .trim()
+            .replace(Regex("\\s+"), " ")
+            .take(MAX_LOCALSEND_V2_ALIAS_LENGTH)
+    }
+
+    private fun sanitizeSharePort(port: Int): Int {
+        return port.coerceIn(1024, 65535)
     }
 }
 
@@ -255,6 +315,15 @@ fun buildLocalNeighborName(): String {
     }
 }
 
+fun buildLocalNeighborName(context: Context): String {
+    val customAlias = NeighborDiscoverySettingsStore.get(context).deviceAlias
+    return customAlias.ifBlank { buildLocalNeighborName() }
+}
+
+fun buildLocalSendV2Name(context: Context): String {
+    return buildLocalNeighborName(context)
+}
+
 fun buildLocalHostName(): String {
     return runCatching { InetAddress.getLocalHost().hostName.orEmpty().trim() }.getOrDefault("")
 }
@@ -310,7 +379,7 @@ class LanNeighborRuntime(
                             val ip = NetworkUtils.getLocalIpAddress(context).orEmpty()
                             val resp = JSONObject()
                                 .put("type", MSG_HELLO)
-                                .put("name", buildLocalNeighborName())
+                                .put("name", buildLocalNeighborName(context))
                                 .put("hostName", buildLocalHostName())
                                 .put("ip", ip)
                                 .put("quickSendPort", DISCOVERY_PORT)

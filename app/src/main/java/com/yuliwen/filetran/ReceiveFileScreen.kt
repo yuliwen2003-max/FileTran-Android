@@ -13,10 +13,12 @@ import android.os.Build
 import android.provider.DocumentsContract
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.Log
 import android.webkit.MimeTypeMap
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Column
@@ -83,6 +85,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
@@ -93,6 +97,7 @@ import java.net.InetSocketAddress
 import java.net.HttpURLConnection
 import java.net.NetworkInterface
 import java.net.URI
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 
@@ -153,7 +158,11 @@ private data class TraceHopRow(
 fun ReceiveFileScreen(
     onSecondaryPageVisibleChanged: ((Boolean) -> Unit)? = null,
     requestedEnhancedMode: Int = 0,
-    onEnhancedModeRequestHandled: () -> Unit = {}
+    onEnhancedModeRequestHandled: () -> Unit = {},
+    pendingQuickSendInvite: QuickSendInvite? = null,
+    onQuickSendInviteHandled: () -> Unit = {},
+    pendingQuickSendCancelId: String? = null,
+    onQuickSendCancelHandled: () -> Unit = {}
 ) {
     var showIpv4UdpEnhancedReceive by rememberSaveable { mutableStateOf(false) }
     var showIpv6UdpEnhancedReceive by rememberSaveable { mutableStateOf(false) }
@@ -236,7 +245,11 @@ fun ReceiveFileScreen(
     val batchControls = remember { mutableMapOf<Int, FileDownloadManager.DownloadControl>() }
     val batchJobs = remember { mutableMapOf<Int, Job>() }
     var reverseServerMode by remember { mutableIntStateOf(0) } // 0: IPv4, 1: IPv6
-    var reverseServerPortInput by remember { mutableStateOf("18080") }
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val initialTransferSettings = remember(context) { NeighborDiscoverySettingsStore.get(context) }
+    var shareRandomPortEnabled by remember { mutableStateOf(initialTransferSettings.shareRandomPort) }
+    var configuredFixedSharePort by remember { mutableIntStateOf(initialTransferSettings.shareFixedPort) }
+    var reverseServerPortInput by remember { mutableStateOf(initialTransferSettings.shareFixedPort.toString()) }
     var reverseUploadServer by remember { mutableStateOf<ReversePushTcpServer?>(null) }
     var reverseServerAddress by remember { mutableStateOf<String?>(null) }
     var reverseServerLocalAddress by remember { mutableStateOf<String?>(null) }
@@ -244,6 +257,8 @@ fun ReceiveFileScreen(
     var reverseServerNatStatus by remember { mutableStateOf<String?>(null) }
     var reverseServerQr by remember { mutableStateOf<Bitmap?>(null) }
     var showReverseServerSheet by remember { mutableStateOf(false) }
+    var showEnhancedReceiveSheet by remember { mutableStateOf(false) }
+    var reverseServerStartJob by remember { mutableStateOf<Job?>(null) }
     var reverseReceiveProgress by remember {
         mutableStateOf(
             ReversePushReceiveProgress(
@@ -270,6 +285,13 @@ fun ReceiveFileScreen(
     var diagnosticsTraceRows by remember { mutableStateOf<List<TraceHopRow>>(emptyList()) }
     var diagnosticsRunning by remember { mutableStateOf(false) }
     var diagnosticsJob by remember { mutableStateOf<Job?>(null) }
+    var activeQuickInvite by remember { mutableStateOf<QuickSendInvite?>(null) }
+    var showQuickInviteSheet by remember { mutableStateOf(false) }
+    var quickInviteCountdown by remember { mutableIntStateOf(0) }
+    var quickInviteActionDone by remember { mutableStateOf(false) }
+    val canceledQuickInviteIds = remember { mutableStateListOf<String>() }
+    var activeQuickInviteDownloadRequestId by remember { mutableStateOf<String?>(null) }
+    val quickInviteReverseInitMutex = remember { Mutex() }
     val isSecondaryPageVisible =
         showIpv4UdpEnhancedReceive ||
             showIpv6UdpEnhancedReceive ||
@@ -281,10 +303,12 @@ fun ReceiveFileScreen(
             showBatchConfirmDialog ||
             (batchTasks.isNotEmpty() && showBatchTaskSheet) ||
             showBatchMediaPickerDialog ||
+            showEnhancedReceiveSheet ||
             showReverseServerSheet ||
             showReverseReceivedListSheet ||
             showReverseReceiveProgressSheet && (reverseReceiveRunning || reverseReceiveProgress.fileName.isNotBlank()) ||
             showDiagnosticsSheet ||
+            showQuickInviteSheet ||
             pendingWifiCredential != null ||
             selectedReverseReceivedFile != null ||
             completedDownload != null
@@ -298,8 +322,50 @@ fun ReceiveFileScreen(
     }
 
     val scope = rememberCoroutineScope()
-    val context = androidx.compose.ui.platform.LocalContext.current
     val clipboardHistoryManager = remember { ClipboardHistoryManager(context) }
+
+    DisposableEffect(context) {
+        val listener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            val settings = NeighborDiscoverySettingsStore.get(context)
+            shareRandomPortEnabled = settings.shareRandomPort
+            configuredFixedSharePort = settings.shareFixedPort
+            if (!shareRandomPortEnabled || reverseUploadServer == null) {
+                reverseServerPortInput = settings.shareFixedPort.toString()
+            }
+        }
+        val prefs = NeighborDiscoverySettingsStore.registerChangeListener(context, listener)
+        onDispose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+
+    fun allocateReverseServerPort(forceRefreshRandom: Boolean = true): Int {
+        return if (shareRandomPortEnabled) {
+            val port = if (!forceRefreshRandom) {
+                reverseServerPortInput.toIntOrNull()
+            } else {
+                null
+            } ?: runCatching {
+                ServerSocket(0).use { socket ->
+                    socket.reuseAddress = true
+                    socket.localPort
+                }
+            }.getOrNull()
+                ?.takeIf { it in 1024..65535 }
+                ?: configuredFixedSharePort.coerceIn(1024, 65535)
+            reverseServerPortInput = port.toString()
+            port
+        } else {
+            configuredFixedSharePort.coerceIn(1024, 65535).also {
+                reverseServerPortInput = it.toString()
+            }
+        }
+    }
+    LaunchedEffect(shareRandomPortEnabled, configuredFixedSharePort) {
+        if (reverseUploadServer == null) {
+            allocateReverseServerPort(forceRefreshRandom = shareRandomPortEnabled)
+        }
+    }
 
     val cameraPermissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission()
@@ -350,16 +416,24 @@ fun ReceiveFileScreen(
         clipboardHistoryManager.addRecord(content, source)
     }
 
-    fun startSingleDownload() {
-        if (hostInput.isBlank() || port.isBlank()) return
+    fun startSingleDownloadFromUrl(
+        url: String,
+        sourceLabel: String? = null,
+        quickInviteRequestId: String? = null
+    ) {
+        val requestId = quickInviteRequestId?.trim().orEmpty()
+        val ownedQuickInviteRequestId = if (requestId.isNotEmpty()) requestId else null
+        if (requestId.isNotEmpty() && canceledQuickInviteIds.contains(requestId)) {
+            errorMessage = "发送方已中断本次发送请求。"
+            return
+        }
         if (!checkStoragePermission()) {
             errorMessage = "需要存储权限后才能下载。"
             return
         }
 
-        val formattedHost = NetworkUtils.formatHostForUrl(hostInput)
-        val url = "http://$formattedHost:$port"
         downloadJob?.cancel()
+        activeQuickInviteDownloadRequestId = ownedQuickInviteRequestId
         isDownloading = true
         isDownloadPaused = false
         errorMessage = null
@@ -384,7 +458,7 @@ fun ReceiveFileScreen(
                                     fileName = progress.fileName,
                                     filePath = filePath,
                                     fileSize = finalSize,
-                                    sourceUrl = url
+                                    sourceUrl = sourceLabel?.let { "$url ($it)" } ?: url
                                 )
                             )
                         }.onFailure { e ->
@@ -406,6 +480,9 @@ fun ReceiveFileScreen(
                         downloadProgress = null
                         downloadControl = null
                         downloadJob = null
+                        if (activeQuickInviteDownloadRequestId == ownedQuickInviteRequestId) {
+                            activeQuickInviteDownloadRequestId = null
+                        }
                         completedDownload = ReceivedDownloadFile(
                             name = progress.fileName,
                             path = filePath,
@@ -418,6 +495,9 @@ fun ReceiveFileScreen(
                 isDownloadPaused = false
                 downloadControl = null
                 downloadJob = null
+                if (activeQuickInviteDownloadRequestId == ownedQuickInviteRequestId) {
+                    activeQuickInviteDownloadRequestId = null
+                }
             } catch (e: Exception) {
                 if (e.message == "DOWNLOAD_CANCELLED") {
                     errorMessage = "下载已取消。"
@@ -429,6 +509,39 @@ fun ReceiveFileScreen(
                 downloadProgress = null
                 downloadControl = null
                 downloadJob = null
+                if (activeQuickInviteDownloadRequestId == ownedQuickInviteRequestId) {
+                    activeQuickInviteDownloadRequestId = null
+                }
+            }
+        }
+    }
+
+    fun startSingleDownload() {
+        if (hostInput.isBlank() || port.isBlank()) return
+        val formattedHost = NetworkUtils.formatHostForUrl(hostInput)
+        val url = "http://$formattedHost:$port"
+        startSingleDownloadFromUrl(url = url)
+    }
+
+    fun ipv4Prefix(ip: String): String? {
+        val parts = ip.trim().split('.')
+        if (parts.size != 4) return null
+        if (parts.any { it.toIntOrNull() !in 0..255 }) return null
+        return "${parts[0]}.${parts[1]}.${parts[2]}"
+    }
+
+    fun shouldUseReversePush(invite: QuickSendInvite): Boolean {
+        return when (invite.preferredTransferMode.lowercase()) {
+            QUICK_TRANSFER_MODE_REVERSE_PUSH -> true
+            QUICK_TRANSFER_MODE_PULL -> false
+            else -> {
+                val senderPrefix = ipv4Prefix(invite.senderIp)
+                val localPrefix = ipv4Prefix(NetworkUtils.getLocalIpAddress(context).orEmpty())
+                if (senderPrefix == null || localPrefix == null) {
+                    false
+                } else {
+                    senderPrefix != localPrefix
+                }
             }
         }
     }
@@ -520,7 +633,11 @@ fun ReceiveFileScreen(
         }
     }
 
-    fun stopReverseUploadServer() {
+    fun stopReverseUploadServer(cancelStartJob: Boolean = true) {
+        if (cancelStartJob) {
+            reverseServerStartJob?.cancel()
+            reverseServerStartJob = null
+        }
         reverseUploadServer?.let { server ->
             runCatching { server.stop() }
         }
@@ -532,16 +649,26 @@ fun ReceiveFileScreen(
         reverseServerQr = null
     }
 
-    fun startReverseUploadServer() {
-        val listenPort = reverseServerPortInput.toIntOrNull()?.takeIf { it in 1024..65535 } ?: 18080
-        reverseServerPortInput = listenPort.toString()
-        scope.launch {
+    fun startReverseUploadServer(preferredTargetIp: String? = null, forceRefreshRandomPort: Boolean = true) {
+        Log.i(
+            "QuickInviteRx",
+            "startReverseUploadServer preferredTargetIp=${preferredTargetIp.orEmpty()} mode=$reverseServerMode nat=$reverseServerNatEnabled portInput=$reverseServerPortInput"
+        )
+        val listenPort = allocateReverseServerPort(forceRefreshRandom = forceRefreshRandomPort)
+        reverseServerStartJob?.cancel()
+        reverseServerStartJob = scope.launch {
             val host = withContext(Dispatchers.IO) {
                 if (reverseServerMode == 1) {
                     val apiV6 = NetworkUtils.getLocalGlobalIpv6Address()
                     apiV6 ?: NetworkUtils.getInterfaceGlobalIpv6Address()
                 } else {
-                    NetworkUtils.getLocalIpAddress(context)
+                    val fallback = NetworkUtils.getLocalIpAddress(context).orEmpty()
+                    val targetIp = preferredTargetIp?.trim().orEmpty()
+                    if (targetIp.isBlank()) {
+                        fallback
+                    } else {
+                        resolvePreferredIpv4ForTarget(targetIp = targetIp, fallback = fallback)
+                    }
                 }
             }
             if (host.isNullOrBlank()) {
@@ -553,7 +680,8 @@ fun ReceiveFileScreen(
                 return@launch
             }
             runCatching {
-                stopReverseUploadServer()
+                stopReverseUploadServer(cancelStartJob = false)
+                delay(160)
                 reverseSessionReceivedFiles.clear()
                 val localListenAddress = "filetranpush://${NetworkUtils.formatHostForUrl(host)}:$listenPort"
                 val batch = if (reverseServerNatEnabled) {
@@ -629,6 +757,10 @@ fun ReceiveFileScreen(
                     .put("endpoint", uploadUrl)
                     .toString()
                 reverseServerQr = QRCodeGenerator.generateQRCode(payload, 512)
+                Log.i(
+                    "QuickInviteRx",
+                    "reverse endpoint ready uploadUrl=$uploadUrl local=$localListenAddress listenPort=$listenPort"
+                )
                 if (reverseServerMode == 1) {
                     val apiV6 = NetworkUtils.getLocalGlobalIpv6Address()
                     val nicV6 = NetworkUtils.getInterfaceGlobalIpv6Address()
@@ -642,10 +774,13 @@ fun ReceiveFileScreen(
                 }
                 errorMessage = null
             }.onFailure { e ->
+                Log.e("QuickInviteRx", "startReverseUploadServer failed", e)
                 reverseUploadServer = null
                 reverseServerAddress = null
                 reverseServerQr = null
                 errorMessage = "反向上传服务启动失败: ${e.message}"
+            }.also {
+                reverseServerStartJob = null
             }
         }
     }
@@ -657,9 +792,143 @@ fun ReceiveFileScreen(
             reverseServerNatEnabled = false
         }
         if (reverseUploadServer != null) {
-            startReverseUploadServer()
+            startReverseUploadServer(forceRefreshRandomPort = true)
             Toast.makeText(context, "已切换到 ${if (mode == 1) "IPv6" else "IPv4"}，上传服务已自动重启", Toast.LENGTH_SHORT).show()
         }
+    }
+
+    suspend fun ensureReverseEndpointForQuickInvite(
+        invite: QuickSendInvite,
+        timeoutMs: Long = 8_000L
+    ): String? {
+        return quickInviteReverseInitMutex.withLock {
+            Log.i(
+                "QuickInviteRx",
+                "ensureReverseEndpoint begin requestId=${invite.requestId} senderIp=${invite.senderIp} responseIp=${invite.responseIp} downloadUrl=${invite.downloadUrl}"
+            )
+            fun extractIpv4HostFromUrl(url: String): String? {
+                val host = runCatching { Uri.parse(url).host.orEmpty().trim() }.getOrDefault("")
+                val parts = host.split('.')
+                if (parts.size != 4) return null
+                if (parts.any { it.toIntOrNull() !in 0..255 }) return null
+                return host
+            }
+
+            suspend fun waitEndpoint(waitMs: Long): String? {
+                val deadline = System.currentTimeMillis() + waitMs.coerceAtLeast(2_000L)
+                while (System.currentTimeMillis() < deadline) {
+                    val endpoint = reverseServerAddress?.trim().orEmpty()
+                    if (endpoint.isNotBlank()) return endpoint
+                    delay(120)
+                }
+                return reverseServerAddress?.trim()?.takeIf { it.isNotBlank() }
+            }
+
+            val routeTargetIp = extractIpv4HostFromUrl(invite.downloadUrl)
+                ?: invite.responseIp.ifBlank { invite.senderIp }
+            reverseServerMode = 0
+            reverseServerNatEnabled = false
+            stopReverseUploadServer()
+            allocateReverseServerPort(forceRefreshRandom = true)
+            startReverseUploadServer(preferredTargetIp = routeTargetIp, forceRefreshRandomPort = false)
+            val primary = waitEndpoint(timeoutMs)
+            if (!primary.isNullOrBlank()) {
+                Log.i("QuickInviteRx", "ensureReverseEndpoint primary success endpoint=$primary")
+                return@withLock primary
+            }
+
+            if (shareRandomPortEnabled) {
+                stopReverseUploadServer()
+                allocateReverseServerPort(forceRefreshRandom = true)
+                startReverseUploadServer(preferredTargetIp = routeTargetIp, forceRefreshRandomPort = false)
+                val fallback = waitEndpoint((timeoutMs / 2L).coerceAtLeast(2_500L))
+                if (!fallback.isNullOrBlank()) {
+                    Log.i("QuickInviteRx", "ensureReverseEndpoint fallback success endpoint=$fallback")
+                    return@withLock fallback
+                }
+            }
+            Log.w("QuickInviteRx", "ensureReverseEndpoint failed requestId=${invite.requestId}")
+            null
+        }
+    }
+
+    fun handleQuickInviteDecision(invite: QuickSendInvite, accept: Boolean) {
+        Log.i(
+            "QuickInviteRx",
+            "handleQuickInviteDecision requestId=${invite.requestId} accept=$accept preferred=${invite.preferredTransferMode}"
+        )
+        if (quickInviteActionDone) return
+        if (canceledQuickInviteIds.contains(invite.requestId)) {
+            quickInviteActionDone = true
+            showQuickInviteSheet = false
+            activeQuickInvite = null
+            Toast.makeText(context, "发送方已中断本次发送请求", Toast.LENGTH_SHORT).show()
+            return
+        }
+        quickInviteActionDone = true
+        showQuickInviteSheet = false
+        if (accept) {
+            if (shouldUseReversePush(invite)) {
+                scope.launch {
+                    val reverseEndpoint = ensureReverseEndpointForQuickInvite(invite)
+                    withContext(Dispatchers.IO) {
+                        sendQuickSendInviteResponse(
+                            invite = invite,
+                            accepted = !reverseEndpoint.isNullOrBlank(),
+                            message = if (reverseEndpoint.isNullOrBlank()) {
+                                "接收端反向服务启动失败"
+                            } else {
+                                "已接收，切换为反向传输"
+                            },
+                            transferMode = if (reverseEndpoint.isNullOrBlank()) {
+                                QUICK_TRANSFER_MODE_PULL
+                            } else {
+                                QUICK_TRANSFER_MODE_REVERSE_PUSH
+                            },
+                            reverseEndpoint = reverseEndpoint.orEmpty()
+                        )
+                    }
+                    if (reverseEndpoint.isNullOrBlank()) {
+                        errorMessage = "反向接收服务启动失败，请重试。"
+                        Toast.makeText(context, "已拒绝：反向接收服务启动失败", Toast.LENGTH_SHORT).show()
+                    } else {
+                        errorMessage = null
+                        Toast.makeText(context, "已接受 ${invite.senderName} 的请求，等待对方上传", Toast.LENGTH_SHORT).show()
+                    }
+                }
+            } else {
+                scope.launch(Dispatchers.IO) {
+                    runCatching {
+                        sendQuickSendInviteResponse(
+                            invite = invite,
+                            accepted = true,
+                            message = "已接收，开始下载",
+                            transferMode = QUICK_TRANSFER_MODE_PULL
+                        )
+                    }
+                }
+                startSingleDownloadFromUrl(
+                    url = invite.downloadUrl,
+                    sourceLabel = "快捷发送:${invite.senderName}",
+                    quickInviteRequestId = invite.requestId
+                )
+                Toast.makeText(context, "已接受 ${invite.senderName} 的发送请求", Toast.LENGTH_SHORT).show()
+                errorMessage = null
+            }
+        } else {
+            scope.launch(Dispatchers.IO) {
+                runCatching {
+                    sendQuickSendInviteResponse(
+                        invite = invite,
+                        accepted = false,
+                        message = "已拒绝",
+                        transferMode = QUICK_TRANSFER_MODE_PULL
+                    )
+                }
+            }
+            Toast.makeText(context, "已拒绝 ${invite.senderName} 的发送请求", Toast.LENGTH_SHORT).show()
+        }
+        activeQuickInvite = null
     }
 
     fun updateBatchTask(id: Int, updater: (BatchDownloadTask) -> BatchDownloadTask) {
@@ -839,6 +1108,64 @@ fun ReceiveFileScreen(
         }
         hasStoragePermission = checkStoragePermission()
     }
+    LaunchedEffect(pendingQuickSendInvite?.requestId) {
+        val invite = pendingQuickSendInvite ?: return@LaunchedEffect
+        onQuickSendInviteHandled()
+        if (canceledQuickInviteIds.contains(invite.requestId)) {
+            return@LaunchedEffect
+        }
+        activeQuickInvite = invite
+        quickInviteActionDone = false
+        val settings = NeighborDiscoverySettingsStore.get(context)
+        val timeout = settings.timeoutSeconds.coerceIn(0, 25)
+        quickInviteCountdown = timeout
+        if (timeout == 0) {
+            handleQuickInviteDecision(
+                invite = invite,
+                accept = settings.defaultAction == NeighborDefaultAction.ACCEPT
+            )
+        } else {
+            showQuickInviteSheet = true
+        }
+    }
+    LaunchedEffect(pendingQuickSendCancelId) {
+        val requestId = pendingQuickSendCancelId?.trim().orEmpty()
+        if (requestId.isBlank()) return@LaunchedEffect
+        onQuickSendCancelHandled()
+        if (!canceledQuickInviteIds.contains(requestId)) {
+            canceledQuickInviteIds.add(requestId)
+            while (canceledQuickInviteIds.size > 60) {
+                canceledQuickInviteIds.removeAt(0)
+            }
+        }
+        if (activeQuickInvite?.requestId == requestId && !quickInviteActionDone) {
+            quickInviteActionDone = true
+            showQuickInviteSheet = false
+            activeQuickInvite = null
+            Toast.makeText(context, "发送方已中断本次发送请求", Toast.LENGTH_SHORT).show()
+        }
+        if (activeQuickInviteDownloadRequestId == requestId) {
+            downloadControl?.cancelled = true
+            downloadJob?.cancel()
+            activeQuickInviteDownloadRequestId = null
+            errorMessage = "发送方已中断发送，接收已停止。"
+            Toast.makeText(context, "发送方已中断本次发送请求", Toast.LENGTH_SHORT).show()
+        }
+    }
+    LaunchedEffect(showQuickInviteSheet, activeQuickInvite?.requestId) {
+        if (!showQuickInviteSheet) return@LaunchedEffect
+        while (showQuickInviteSheet && activeQuickInvite != null && quickInviteCountdown > 0 && !quickInviteActionDone) {
+            delay(1000)
+            quickInviteCountdown -= 1
+        }
+        if (showQuickInviteSheet && activeQuickInvite != null && quickInviteCountdown <= 0 && !quickInviteActionDone) {
+            val settings = NeighborDiscoverySettingsStore.get(context)
+            handleQuickInviteDecision(
+                invite = activeQuickInvite ?: return@LaunchedEffect,
+                accept = settings.defaultAction == NeighborDefaultAction.ACCEPT
+            )
+        }
+    }
 
     if (showScanner) {
         QRCodeScanner(
@@ -896,6 +1223,58 @@ fun ReceiveFileScreen(
             },
             onDismiss = { showWifiJoinScanner = false }
         )
+    }
+
+    if (showQuickInviteSheet && activeQuickInvite != null) {
+        BackHandler(enabled = true) {}
+        val quickInvite = activeQuickInvite!!
+        val quickInviteDefaultAction = NeighborDiscoverySettingsStore.get(context).defaultAction
+        val quickSheetState = rememberModalBottomSheetState(
+            skipPartiallyExpanded = true,
+            confirmValueChange = { it != SheetValue.Hidden }
+        )
+        ModalBottomSheet(
+            onDismissRequest = {},
+            sheetState = quickSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("文件接收请求", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(
+                    "发送方：${quickInvite.senderName}" +
+                        if (quickInvite.senderIp.isBlank()) "" else " (${quickInvite.senderIp})",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text("文件名：${quickInvite.fileName}")
+                Text("文件大小：${if (quickInvite.fileSize >= 0L) formatBytes(quickInvite.fileSize) else "未知"}")
+                Text(
+                    "${quickInviteCountdown}s 后自动${if (quickInviteDefaultAction == NeighborDefaultAction.ACCEPT) "接收" else "拒绝"}",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = { handleQuickInviteDecision(quickInvite, accept = false) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("拒绝")
+                    }
+                    Button(
+                        onClick = { handleQuickInviteDecision(quickInvite, accept = true) },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("允许接收")
+                    }
+                }
+            }
+        }
     }
 
     DisposableEffect(Unit) {
@@ -1006,23 +1385,22 @@ fun ReceiveFileScreen(
                 Text("开始下载", fontSize = 16.sp)
             }
 
-            OutlinedButton(
-                onClick = { showReverseServerSheet = true },
-                modifier = Modifier.fillMaxWidth()
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
             ) {
-                Text("反向传输")
-            }
-            OutlinedButton(
-                onClick = { showIpv4UdpEnhancedReceive = true },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("IPv4 增强传输（UDP 打洞后直收）")
-            }
-            OutlinedButton(
-                onClick = { showIpv6UdpEnhancedReceive = true },
-                modifier = Modifier.fillMaxWidth()
-            ) {
-                Text("IPv6 增强传输（UDP 打洞后直收）")
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("增强传输（接收端）", fontWeight = FontWeight.SemiBold)
+                    OutlinedButton(
+                        onClick = { showEnhancedReceiveSheet = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("打开增强传输分组")
+                    }
+                }
             }
             if (!showReverseReceiveProgressSheet && (reverseReceiveRunning || reverseReceiveProgress.fileName.isNotBlank())) {
                 OutlinedButton(
@@ -1169,12 +1547,10 @@ fun ReceiveFileScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    OutlinedTextField(
-                        value = reverseServerPortInput,
-                        onValueChange = { reverseServerPortInput = it.filter { ch -> ch.isDigit() } },
-                        label = { Text("上传服务端口") },
-                        placeholder = { Text("18080") },
-                        singleLine = true,
+                    Text(
+                        "当前端口：$reverseServerPortInput · ${if (shareRandomPortEnabled) "随机" else "固定"}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.weight(1f)
                     )
                     Column(
@@ -1186,7 +1562,7 @@ fun ReceiveFileScreen(
                             onCheckedChange = { enabled ->
                                 reverseServerNatEnabled = enabled
                                 if (reverseUploadServer != null && reverseServerMode == 0) {
-                                    startReverseUploadServer()
+                                    startReverseUploadServer(forceRefreshRandomPort = true)
                                 }
                             },
                             enabled = reverseServerMode == 0
@@ -1203,7 +1579,7 @@ fun ReceiveFileScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     Button(
-                        onClick = { startReverseUploadServer() },
+                        onClick = { startReverseUploadServer(forceRefreshRandomPort = true) },
                         modifier = Modifier.weight(1f)
                     ) {
                         Text(if (reverseUploadServer == null) "启动服务" else "重启服务")
@@ -1253,6 +1629,67 @@ fun ReceiveFileScreen(
                     onClick = { showReverseServerSheet = false },
                     modifier = Modifier.fillMaxWidth()
                 ) { Text("关闭") }
+            }
+        }
+    }
+
+    if (showEnhancedReceiveSheet) {
+        val enhancedReceiveSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        ModalBottomSheet(
+            onDismissRequest = { showEnhancedReceiveSheet = false },
+            sheetState = enhancedReceiveSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text("增强传输（接收端）", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                OutlinedButton(
+                    onClick = {
+                        showEnhancedReceiveSheet = false
+                        showReverseServerSheet = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("反向传输")
+                }
+                OutlinedButton(
+                    onClick = {
+                        showEnhancedReceiveSheet = false
+                        showIpv4UdpEnhancedReceive = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("IPv4 增强传输（接收端）")
+                }
+                OutlinedButton(
+                    onClick = {
+                        showEnhancedReceiveSheet = false
+                        showIpv6UdpEnhancedReceive = true
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("IPv6 增强传输（接收端）")
+                }
+                if (!showReverseReceiveProgressSheet && (reverseReceiveRunning || reverseReceiveProgress.fileName.isNotBlank())) {
+                    OutlinedButton(
+                        onClick = {
+                            showEnhancedReceiveSheet = false
+                            showReverseReceiveProgressSheet = true
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("查看反向传输进度")
+                    }
+                }
+                TextButton(
+                    onClick = { showEnhancedReceiveSheet = false },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("关闭")
+                }
             }
         }
     }
@@ -1695,6 +2132,7 @@ fun ReceiveFileScreen(
                         downloadProgress = null
                         downloadControl = null
                         downloadJob = null
+                        activeQuickInviteDownloadRequestId = null
                         errorMessage = "下载已取消。"
                     },
                     modifier = Modifier.fillMaxWidth()

@@ -5,6 +5,7 @@ import android.net.Uri
 import android.os.Build
 import android.util.Log
 import fi.iki.elonen.NanoHTTPD
+import okhttp3.Call
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -19,6 +20,7 @@ import java.net.DatagramPacket
 import java.net.InetAddress
 import java.net.MulticastSocket
 import java.net.SocketTimeoutException
+import java.nio.charset.Charset
 import java.net.URLEncoder
 import java.security.SecureRandom
 import java.security.cert.X509Certificate
@@ -39,6 +41,7 @@ private const val LOCALSEND_API_PREFIX = "/api/localsend/v2"
 private const val LOCALSEND_MULTICAST_HOST = "224.0.0.167"
 private const val LOCALSEND_PEER_TTL_MS = 45_000L
 private const val LOCALSEND_ANNOUNCE_INTERVAL_MS = 20_000L
+private const val LOCALSEND_DETAIL_REFRESH_INTERVAL_MS = 12_000L
 private const val LOCALSEND_BUFFER_SIZE = 16 * 1024
 
 data class LocalSendPeer(
@@ -81,6 +84,41 @@ data class LocalSendIncomingRequest(
     val firstFileName: String
 )
 
+class LocalSendSendControl {
+    private val cancelled = AtomicBoolean(false)
+
+    @Volatile
+    private var activeCall: Call? = null
+
+    fun isCancelled(): Boolean = cancelled.get()
+
+    fun cancel(force: Boolean = true) {
+        cancelled.set(true)
+        if (force) {
+            synchronized(this) {
+                activeCall?.cancel()
+            }
+        }
+    }
+
+    internal fun bind(call: Call) {
+        synchronized(this) {
+            activeCall = call
+            if (cancelled.get()) {
+                call.cancel()
+            }
+        }
+    }
+
+    internal fun release(call: Call) {
+        synchronized(this) {
+            if (activeCall === call) {
+                activeCall = null
+            }
+        }
+    }
+}
+
 class LocalSendRuntime(
     private val context: Context,
     private val ownerTag: String = "runtime",
@@ -94,6 +132,7 @@ class LocalSendRuntime(
     private val appContext = context.applicationContext
     private val running = AtomicBoolean(false)
     private val peers = ConcurrentHashMap<String, LocalSendPeer>()
+    private val peerDetailRefreshAt = ConcurrentHashMap<String, Long>()
     private val sessions = ConcurrentHashMap<String, PendingSession>()
     private val announceNow = AtomicBoolean(false)
     private val selfFingerprint: String by lazy {
@@ -147,6 +186,7 @@ class LocalSendRuntime(
         worker?.interrupt()
         worker = null
         sessions.clear()
+        peerDetailRefreshAt.clear()
         peers.clear()
         publishPeers()
         Log.i("LocalSendRuntime", "[$ownerTag] stopped")
@@ -224,7 +264,7 @@ class LocalSendRuntime(
                     continue
                 }
                 handleUdpPacket(
-                    message = String(packet.data, packet.offset, packet.length, Charsets.UTF_8).trim(),
+                    payload = packet.data.copyOfRange(packet.offset, packet.offset + packet.length),
                     senderIp = packet.address?.hostAddress.orEmpty().trim(),
                     group = group,
                     socket = socket
@@ -242,33 +282,21 @@ class LocalSendRuntime(
     }
 
     private fun handleUdpPacket(
-        message: String,
+        payload: ByteArray,
         senderIp: String,
         group: InetAddress,
         socket: MulticastSocket
     ) {
-        if (message.isBlank() || senderIp.isBlank()) return
-        val json = runCatching { JSONObject(message) }.getOrNull() ?: return
+        if (payload.isEmpty() || senderIp.isBlank()) return
+        val json = LocalSendProtocol.parseJsonObject(payload) ?: return
         val peer = LocalSendProtocol.parsePeer(json, senderIp) ?: return
         if (peer.fingerprint == selfFingerprint) return
         upsertPeer(peer)
+        val storedPeer = peers["${peer.fingerprint}|${peer.ip}"] ?: peer
         if (json.optBoolean("announce", false)) {
             sendUdpAnnounce(socket, group, announce = false)
-            Thread {
-                runCatching {
-                    val responsePeer = LocalSendProtocol.sendRegisterAndParsePeer(
-                        context = appContext,
-                        targetIp = peer.ip,
-                        targetPort = peer.port,
-                        targetProtocol = peer.protocol,
-                        localPort = httpPort
-                    )
-                    if (responsePeer != null) {
-                        upsertPeer(responsePeer)
-                    }
-                }
-            }.start()
         }
+        maybeRefreshPeerDetails(storedPeer, force = json.optBoolean("announce", false))
     }
 
     private fun sendUdpAnnounce(socket: MulticastSocket, group: InetAddress, announce: Boolean) {
@@ -286,8 +314,43 @@ class LocalSendRuntime(
     }
 
     private fun upsertPeer(peer: LocalSendPeer) {
-        peers["${peer.fingerprint}|${peer.ip}"] = peer.copy(lastSeenAt = System.currentTimeMillis())
+        val key = "${peer.fingerprint}|${peer.ip}"
+        val existing = peers[key]
+        val merged = LocalSendProtocol.mergePeer(existing, peer)
+            .copy(lastSeenAt = System.currentTimeMillis())
+        peers[key] = merged
         publishPeers()
+    }
+
+    private fun maybeRefreshPeerDetails(peer: LocalSendPeer, force: Boolean = false) {
+        if (!force && !LocalSendProtocol.needsPeerDetailsRefresh(peer)) return
+        val key = "${peer.fingerprint}|${peer.ip}"
+        val now = System.currentTimeMillis()
+        val previous = peerDetailRefreshAt[key]
+        if (!force && previous != null && now - previous < LOCALSEND_DETAIL_REFRESH_INTERVAL_MS) {
+            return
+        }
+        peerDetailRefreshAt[key] = now
+        Thread {
+            runCatching {
+                val refreshedPeer = LocalSendProtocol.refreshPeerDetails(
+                    context = appContext,
+                    currentPeer = peer,
+                    localPort = httpPort
+                ) ?: return@runCatching
+                upsertPeer(refreshedPeer)
+                if (refreshedPeer.alias != peer.alias || refreshedPeer.deviceModel != peer.deviceModel) {
+                    Log.i(
+                        "LocalSendRuntime",
+                        "[$ownerTag] refreshed peer ip=${peer.ip} alias=${refreshedPeer.alias} model=${refreshedPeer.deviceModel}"
+                    )
+                }
+            }
+        }.apply {
+            name = "LocalSendPeerRefresh-$ownerTag"
+            isDaemon = true
+            start()
+        }
     }
 
     private fun cleanupPeers() {
@@ -314,6 +377,7 @@ class LocalSendRuntime(
         val fileType: String,
         val size: Long,
         val token: String,
+        val previewText: String? = null,
         var done: Boolean = false
     )
 
@@ -357,6 +421,10 @@ class LocalSendRuntime(
                 handleRegister(session)
             }
 
+            method == NanoHTTPD.Method.GET && path == "$LOCALSEND_API_PREFIX/info" -> {
+                handleInfo(session)
+            }
+
             method == NanoHTTPD.Method.POST && path == "$LOCALSEND_API_PREFIX/prepare-upload" -> {
                 handlePrepareUpload(session)
             }
@@ -380,22 +448,24 @@ class LocalSendRuntime(
         val peer = LocalSendProtocol.parsePeer(body, senderIp)
         if (peer != null && peer.fingerprint != selfFingerprint) {
             upsertPeer(peer)
-            if (body.optBoolean("announce", false)) {
-                Thread {
-                    runCatching {
-                        val responsePeer = LocalSendProtocol.sendRegisterAndParsePeer(
-                            context = appContext,
-                            targetIp = peer.ip,
-                            targetPort = peer.port,
-                            targetProtocol = peer.protocol,
-                            localPort = httpPort
-                        )
-                        if (responsePeer != null) {
-                            upsertPeer(responsePeer)
-                        }
-                    }
-                }.start()
-            }
+            val storedPeer = peers["${peer.fingerprint}|${peer.ip}"] ?: peer
+            maybeRefreshPeerDetails(storedPeer, force = body.optBoolean("announce", false))
+        }
+        return jsonResponse(
+            NanoHTTPD.Response.Status.OK,
+            LocalSendProtocol.buildDeviceInfoJson(
+                context = appContext,
+                port = httpPort,
+                protocol = "http",
+                announce = null
+            ).toString()
+        )
+    }
+
+    private fun handleInfo(session: NanoHTTPD.IHTTPSession): NanoHTTPD.Response {
+        val requesterFingerprint = queryParam(session, "fingerprint")
+        if (requesterFingerprint.isNotBlank() && requesterFingerprint == selfFingerprint) {
+            return textResponse(NanoHTTPD.Response.Status.PRECONDITION_FAILED, "Self-discovered")
         }
         return jsonResponse(
             NanoHTTPD.Response.Status.OK,
@@ -424,7 +494,10 @@ class LocalSendRuntime(
             return textResponse(NanoHTTPD.Response.Status.NO_CONTENT, "")
         }
         val senderIp = session.headers["remote-addr"].orEmpty().trim()
-        val senderAlias = info.optString("alias").trim().ifBlank { "LocalSend sender" }
+        val senderAlias = LocalSendProtocol.normalizeDisplayText(
+            raw = info.optString("alias"),
+            fallback = "LocalSend sender"
+        ).takeUnless { LocalSendProtocol.looksLikeUnknownName(it) } ?: "LocalSend sender"
         val preparedFiles = mutableListOf<PendingFile>()
         val keys = filesObj.keys()
         while (keys.hasNext()) {
@@ -433,13 +506,15 @@ class LocalSendRuntime(
             val fileName = file.optString("fileName").trim().ifBlank { "localsend_${System.currentTimeMillis()}" }
             val fileType = file.optString("fileType").trim().ifBlank { "application/octet-stream" }
             val size = file.optLong("size", -1L).coerceAtLeast(0L)
+            val previewText = file.optString("preview").trim().ifBlank { null }
             val token = UUID.randomUUID().toString().replace("-", "")
             preparedFiles += PendingFile(
                 id = id,
                 fileName = fileName,
                 fileType = fileType,
                 size = size,
-                token = token
+                token = token,
+                previewText = previewText
             )
         }
         if (preparedFiles.isEmpty()) {
@@ -468,6 +543,24 @@ class LocalSendRuntime(
             LocalSendIncomingDecision.ACCEPT -> Unit
         }
 
+        val inlineMessage = detectInlineMessage(preparedFiles)
+        if (inlineMessage != null) {
+            onReceiveEvent(
+                LocalSendReceiveEvent(
+                    stage = LocalSendReceiveStage.MESSAGE_RECEIVED,
+                    sessionId = sessionId,
+                    fileId = inlineMessage.id,
+                    fileName = inlineMessage.fileName,
+                    fileSize = inlineMessage.size,
+                    senderAlias = senderAlias,
+                    senderIp = senderIp,
+                    mimeType = inlineMessage.fileType,
+                    textContent = inlineMessage.previewText.orEmpty()
+                )
+            )
+            return textResponse(NanoHTTPD.Response.Status.NO_CONTENT, "")
+        }
+
         synchronized(this) {
             val active = activeSessionId
             if (!active.isNullOrBlank() && sessions.containsKey(active)) {
@@ -486,7 +579,8 @@ class LocalSendRuntime(
                         fileName = pending.fileName,
                         fileSize = pending.size,
                         senderAlias = senderAlias,
-                        senderIp = senderIp
+                        senderIp = senderIp,
+                        mimeType = pending.fileType
                     )
                 )
             }
@@ -524,7 +618,7 @@ class LocalSendRuntime(
         }
 
         val downloadDir = FileDownloadManager.getDownloadDirectory(appContext).apply { mkdirs() }
-        val outputFile = uniqueTargetFile(downloadDir, sanitizeFileName(pendingFile.fileName))
+        val outputFile = buildTargetFile(downloadDir, pendingFile.fileName)
         val totalBytesHint = pendingFile.size.coerceAtLeast(0L)
         var lastProgressAt = 0L
         var lastProgressBytes = 0L
@@ -548,6 +642,7 @@ class LocalSendRuntime(
                                 fileSize = totalBytesHint,
                                 senderAlias = pendingSession.senderAlias,
                                 senderIp = pendingSession.senderIp,
+                                mimeType = pendingFile.fileType,
                                 receivedBytes = safeBytes
                             )
                         )
@@ -555,51 +650,34 @@ class LocalSendRuntime(
                 }
             }
         }.getOrElse {
-            onReceiveEvent(
-                LocalSendReceiveEvent(
-                    stage = LocalSendReceiveStage.FAILED,
-                    sessionId = sessionId,
-                    fileId = fileId,
-                    fileName = pendingFile.fileName,
-                    fileSize = pendingFile.size,
-                    senderAlias = pendingSession.senderAlias,
-                    senderIp = pendingSession.senderIp,
-                    message = "write_failed"
-                )
+            return failPendingTransfer(
+                sessionId = sessionId,
+                pendingSession = pendingSession,
+                pendingFile = pendingFile,
+                status = NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                code = classifyUploadFailure(it),
+                partialFile = outputFile
             )
-            return textResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "write_failed")
         }
         if (written <= 0L && pendingFile.size > 0L) {
-            onReceiveEvent(
-                LocalSendReceiveEvent(
-                    stage = LocalSendReceiveStage.FAILED,
-                    sessionId = sessionId,
-                    fileId = fileId,
-                    fileName = pendingFile.fileName,
-                    fileSize = pendingFile.size,
-                    senderAlias = pendingSession.senderAlias,
-                    senderIp = pendingSession.senderIp,
-                    message = "empty_body"
-                )
+            return failPendingTransfer(
+                sessionId = sessionId,
+                pendingSession = pendingSession,
+                pendingFile = pendingFile,
+                status = NanoHTTPD.Response.Status.BAD_REQUEST,
+                code = "empty_body",
+                partialFile = outputFile
             )
-            runCatching { outputFile.delete() }
-            return textResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "empty_body")
         }
         if (pendingFile.size > 0L && written != pendingFile.size) {
-            onReceiveEvent(
-                LocalSendReceiveEvent(
-                    stage = LocalSendReceiveStage.FAILED,
-                    sessionId = sessionId,
-                    fileId = fileId,
-                    fileName = pendingFile.fileName,
-                    fileSize = pendingFile.size,
-                    senderAlias = pendingSession.senderAlias,
-                    senderIp = pendingSession.senderIp,
-                    message = "size_mismatch"
-                )
+            return failPendingTransfer(
+                sessionId = sessionId,
+                pendingSession = pendingSession,
+                pendingFile = pendingFile,
+                status = NanoHTTPD.Response.Status.BAD_REQUEST,
+                code = "size_mismatch",
+                partialFile = outputFile
             )
-            runCatching { outputFile.delete() }
-            return textResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "size_mismatch")
         }
         onReceiveEvent(
             LocalSendReceiveEvent(
@@ -610,6 +688,7 @@ class LocalSendRuntime(
                 fileSize = if (totalBytesHint > 0L) totalBytesHint else written.coerceAtLeast(0L),
                 senderAlias = pendingSession.senderAlias,
                 senderIp = pendingSession.senderIp,
+                mimeType = pendingFile.fileType,
                 receivedBytes = written.coerceAtLeast(0L)
             )
         )
@@ -636,7 +715,8 @@ class LocalSendRuntime(
                 fileSize = finalSize,
                 localPath = outputFile.absolutePath,
                 senderAlias = pendingSession.senderAlias,
-                senderIp = pendingSession.senderIp
+                senderIp = pendingSession.senderIp,
+                mimeType = pendingFile.fileType
             )
         )
 
@@ -672,23 +752,82 @@ class LocalSendRuntime(
         return textResponse(NanoHTTPD.Response.Status.OK, "")
     }
 
+    private fun detectInlineMessage(files: List<PendingFile>): PendingFile? {
+        val first = files.singleOrNull() ?: return null
+        val preview = first.previewText?.trim().orEmpty()
+        if (preview.isBlank()) return null
+        return first.takeIf { it.fileType.lowercase().startsWith("text/") }
+    }
+
+    private fun classifyUploadFailure(error: Throwable): String {
+        val text = buildString {
+            append(error.message.orEmpty())
+            generateSequence(error.cause) { it.cause }
+                .forEach {
+                    if (it.message?.isNotBlank() == true) {
+                        append(' ')
+                        append(it.message)
+                    }
+                }
+        }.lowercase()
+        return when {
+            error is java.net.SocketTimeoutException -> "network_interrupted"
+            "unexpected_eof" in text -> "network_interrupted"
+            "connection reset" in text -> "network_interrupted"
+            "broken pipe" in text -> "network_interrupted"
+            "socket closed" in text -> "network_interrupted"
+            "stream closed" in text -> "network_interrupted"
+            "timeout" in text -> "network_interrupted"
+            else -> "write_failed"
+        }
+    }
+
+    private fun failPendingTransfer(
+        sessionId: String,
+        pendingSession: PendingSession,
+        pendingFile: PendingFile,
+        status: NanoHTTPD.Response.Status,
+        code: String,
+        partialFile: File? = null
+    ): NanoHTTPD.Response {
+        runCatching { partialFile?.delete() }
+        sessions.remove(sessionId)
+        if (activeSessionId == sessionId) {
+            activeSessionId = null
+        }
+        onReceiveEvent(
+            LocalSendReceiveEvent(
+                stage = LocalSendReceiveStage.FAILED,
+                sessionId = sessionId,
+                fileId = pendingFile.id,
+                fileName = pendingFile.fileName,
+                fileSize = pendingFile.size,
+                senderAlias = pendingSession.senderAlias,
+                senderIp = pendingSession.senderIp,
+                mimeType = pendingFile.fileType,
+                message = code
+            )
+        )
+        return textResponse(status, code)
+    }
+
     private fun parseJsonBody(session: NanoHTTPD.IHTTPSession): JSONObject? {
         val files = HashMap<String, String>()
         return runCatching {
             session.parseBody(files)
             val postDataRef = files["postData"]?.trim().orEmpty()
-            val postData = when {
-                postDataRef.isBlank() -> ""
+            when {
+                postDataRef.isBlank() -> JSONObject()
                 else -> {
                     val file = File(postDataRef)
                     if (file.exists() && file.isFile) {
-                        file.readText(Charsets.UTF_8)
+                        LocalSendProtocol.parseJsonObject(file.readBytes())
+                            ?: JSONObject(file.readText(Charsets.UTF_8))
                     } else {
-                        postDataRef
+                        JSONObject(postDataRef)
                     }
                 }
             }
-            if (postData.isBlank()) JSONObject() else JSONObject(postData)
         }.getOrNull()
     }
 
@@ -841,16 +980,44 @@ class LocalSendRuntime(
         return NanoHTTPD.newFixedLengthResponse(status, "text/plain; charset=utf-8", body)
     }
 
-    private fun sanitizeFileName(name: String): String {
+    private fun sanitizePathSegment(name: String): String {
         val trimmed = name.trim().ifBlank { "localsend_${System.currentTimeMillis()}" }
         return trimmed.replace(Regex("[\\\\/:*?\"<>|]"), "_")
     }
 
+    private fun sanitizeRelativePath(name: String): List<String> {
+        val normalized = name.replace('\\', '/')
+        val parts = normalized.split('/')
+            .mapNotNull { segment ->
+                val trimmed = segment.trim()
+                when {
+                    trimmed.isBlank() -> null
+                    trimmed == "." -> null
+                    trimmed == ".." -> null
+                    else -> sanitizePathSegment(trimmed)
+                }
+            }
+        return if (parts.isEmpty()) {
+            listOf(sanitizePathSegment(name))
+        } else {
+            parts
+        }
+    }
+
+    private fun buildTargetFile(rootDir: File, relativeName: String): File {
+        val pathParts = sanitizeRelativePath(relativeName)
+        val parentDir = pathParts.dropLast(1).fold(rootDir) { current, part ->
+            File(current, part).apply { mkdirs() }
+        }
+        return uniqueTargetFile(parentDir, pathParts.last())
+    }
+
     private fun uniqueTargetFile(dir: File, fileName: String): File {
-        val first = File(dir, fileName)
+        val clean = sanitizePathSegment(fileName)
+        val first = File(dir, clean)
         if (!first.exists()) return first
-        val base = fileName.substringBeforeLast(".", fileName)
-        val ext = fileName.substringAfterLast(".", "").let { if (it.isBlank()) "" else ".${it}" }
+        val base = clean.substringBeforeLast(".", clean)
+        val ext = clean.substringAfterLast(".", "").let { if (it.isBlank()) "" else ".${it}" }
         var index = 1
         while (true) {
             val candidate = File(dir, "${base}_$index$ext")
@@ -862,10 +1029,12 @@ class LocalSendRuntime(
 
 data class LocalSendSendFile(
     val id: String,
-    val uri: Uri,
+    val uri: Uri? = null,
     val fileName: String,
     val mimeType: String,
-    val size: Long
+    val size: Long,
+    val inlineBytes: ByteArray? = null,
+    val previewText: String? = null
 )
 
 data class LocalSendSendProgress(
@@ -879,6 +1048,7 @@ enum class LocalSendReceiveStage {
     STARTED,
     PROGRESS,
     COMPLETED,
+    MESSAGE_RECEIVED,
     FAILED,
     CANCELLED
 }
@@ -893,6 +1063,8 @@ data class LocalSendReceiveEvent(
     val localPath: String = "",
     val senderAlias: String = "",
     val senderIp: String = "",
+    val mimeType: String = "",
+    val textContent: String = "",
     val message: String = ""
 )
 
@@ -939,6 +1111,28 @@ object LocalSendProtocol {
     private const val DEVICE_TYPE = "mobile"
     private const val PROTOCOL_VERSION = "2.1"
     private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaTypeOrNull()
+    private val WINDOWS_1252: Charset = runCatching {
+        Charset.forName("windows-1252")
+    }.getOrElse {
+        Charsets.ISO_8859_1
+    }
+    private val JSON_CHARSETS: List<Charset> = buildList {
+        add(Charsets.UTF_8)
+        listOf(
+            "GB18030",
+            "GBK",
+            "UTF-16",
+            "UTF-16LE",
+            "UTF-16BE",
+            WINDOWS_1252.name(),
+            Charsets.ISO_8859_1.name()
+        ).forEach { name ->
+            val charset = runCatching { Charset.forName(name) }.getOrNull() ?: return@forEach
+            if (none { it.name().equals(charset.name(), ignoreCase = true) }) {
+                add(charset)
+            }
+        }
+    }
 
     private val httpClient: OkHttpClient by lazy {
         OkHttpClient.Builder()
@@ -974,51 +1168,323 @@ object LocalSendProtocol {
         }
     }
 
-    private fun looksLikeMojibake(text: String): Boolean {
-        if (text.isBlank()) return false
-        if (text.contains('\uFFFD')) return true
-        return text.contains("Ã") ||
-            text.contains("Â") ||
-            text.contains("æ") ||
-            text.contains("å") ||
-            text.contains("ç")
+    private fun decodeJsonPayload(payload: ByteArray, charset: Charset): String? {
+        val decoded = runCatching { String(payload, charset) }.getOrNull() ?: return null
+        val normalized = decoded
+            .removePrefix("\uFEFF")
+            .trim()
+        if (normalized.isBlank()) return null
+        return normalized
     }
 
-    private fun looksLikeUnknownName(text: String): Boolean {
+    private fun scoreDecodedDisplayText(
+        raw: String,
+        blankPenalty: Int,
+        unknownPenalty: Int,
+        normalizationPenalty: Int
+    ): Int {
+        val trimmed = raw
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (trimmed.isBlank()) return blankPenalty
+
+        var score = mojibakeScore(trimmed) * 4
+        if (looksLikeMojibake(trimmed)) score += 24
+        if (looksLikeUnknownName(trimmed)) score += unknownPenalty
+
+        val normalized = normalizeDisplayText(trimmed, "")
+        if (normalized.isBlank()) return score + blankPenalty
+        if (normalized != trimmed) score += normalizationPenalty
+        score += mojibakeScore(normalized)
+        if (looksLikeUnknownName(normalized)) score += unknownPenalty / 2
+        return score
+    }
+
+    private fun scoreDecodedJson(json: JSONObject): Int {
+        var score = 0
+        score += scoreDecodedDisplayText(
+            raw = json.optString("alias"),
+            blankPenalty = 120,
+            unknownPenalty = 36,
+            normalizationPenalty = 12
+        )
+        score += scoreDecodedDisplayText(
+            raw = json.optString("deviceModel"),
+            blankPenalty = 24,
+            unknownPenalty = 8,
+            normalizationPenalty = 4
+        )
+        if (json.optString("fingerprint").trim().isBlank()) {
+            score += 6
+        }
+        val protocol = json.optString("protocol").trim().lowercase()
+        if (protocol.isNotBlank() && protocol != "http" && protocol != "https") {
+            score += 4
+        }
+        return score
+    }
+
+    private fun scorePeerAlias(alias: String, deviceModel: String): Int {
+        val trimmedAlias = alias
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (trimmedAlias.isBlank()) return 10_000
+
+        var score = mojibakeScore(trimmedAlias) * 8
+        if (looksLikeUnknownName(trimmedAlias)) score += 240
+        if (looksLikeMojibake(trimmedAlias)) score += 40
+
+        val trimmedModel = deviceModel
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (trimmedModel.isNotBlank() && trimmedAlias.equals(trimmedModel, ignoreCase = true)) {
+            score += 90
+        }
+        return score
+    }
+
+    private fun scorePeerModel(deviceModel: String): Int {
+        val trimmed = deviceModel
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (trimmed.isBlank()) return 10_000
+
+        var score = mojibakeScore(trimmed) * 6
+        if (looksLikeUnknownName(trimmed)) score += 60
+        if (looksLikeMojibake(trimmed)) score += 20
+        return score
+    }
+
+    internal fun mergePeer(existing: LocalSendPeer?, incoming: LocalSendPeer): LocalSendPeer {
+        if (existing == null) return incoming
+
+        val incomingAliasScore = scorePeerAlias(incoming.alias, incoming.deviceModel)
+        val existingAliasScore = scorePeerAlias(existing.alias, existing.deviceModel)
+        val preferIncomingAlias = incomingAliasScore <= existingAliasScore
+
+        val incomingModelScore = scorePeerModel(incoming.deviceModel)
+        val existingModelScore = scorePeerModel(existing.deviceModel)
+        val preferIncomingModel = incomingModelScore <= existingModelScore
+
+        return incoming.copy(
+            alias = if (preferIncomingAlias) incoming.alias else existing.alias,
+            deviceModel = if (preferIncomingModel) incoming.deviceModel else existing.deviceModel,
+            deviceType = incoming.deviceType.ifBlank { existing.deviceType },
+            fingerprint = incoming.fingerprint.ifBlank { existing.fingerprint },
+            protocol = incoming.protocol.ifBlank { existing.protocol },
+            port = incoming.port.takeIf { it in 1..65535 } ?: existing.port,
+            download = incoming.download,
+            lastSeenAt = maxOf(existing.lastSeenAt, incoming.lastSeenAt)
+        )
+    }
+
+    internal fun needsPeerDetailsRefresh(peer: LocalSendPeer): Boolean {
+        val alias = peer.alias
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (alias.isBlank()) return true
+        if (looksLikeUnknownName(alias)) return true
+
+        val model = peer.deviceModel
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (model.isNotBlank() && alias.equals(model, ignoreCase = true)) return true
+
+        return false
+    }
+
+    private fun schemeCandidates(preferredScheme: String): List<String> {
+        val primary = if (preferredScheme.equals("https", true)) "https" else "http"
+        val secondary = if (primary == "https") "http" else "https"
+        return listOf(primary, secondary)
+    }
+
+    private fun samePeerDetails(first: LocalSendPeer, second: LocalSendPeer): Boolean {
+        return first.alias == second.alias &&
+            first.deviceModel == second.deviceModel &&
+            first.deviceType == second.deviceType &&
+            first.port == second.port &&
+            first.protocol == second.protocol &&
+            first.download == second.download
+    }
+
+    internal fun parseJsonObject(payload: ByteArray): JSONObject? {
+        if (payload.isEmpty()) return null
+
+        data class Candidate(
+            val json: JSONObject,
+            val charset: Charset,
+            val score: Int,
+            val priority: Int
+        )
+
+        var best: Candidate? = null
+        JSON_CHARSETS.forEachIndexed { index, charset ->
+            val decoded = decodeJsonPayload(payload, charset) ?: return@forEachIndexed
+            val json = runCatching { JSONObject(decoded) }.getOrNull() ?: return@forEachIndexed
+            val score = scoreDecodedJson(json)
+            val current = best
+            if (
+                current == null ||
+                score < current.score ||
+                (score == current.score && index < current.priority)
+            ) {
+                best = Candidate(
+                    json = json,
+                    charset = charset,
+                    score = score,
+                    priority = index
+                )
+            }
+        }
+
+        val candidate = best ?: return null
+        if (!candidate.charset.name().equals(Charsets.UTF_8.name(), ignoreCase = true)) {
+            runCatching {
+                Log.i(
+                    "LocalSendRuntime",
+                    "parseJsonObject selected charset=${candidate.charset.name()} " +
+                        "alias=${summarizeDisplayTextForLog(candidate.json.optString("alias"))} " +
+                        "deviceModel=${summarizeDisplayTextForLog(candidate.json.optString("deviceModel"))}"
+                )
+            }
+        }
+        return candidate.json
+    }
+
+    internal fun looksLikeUnknownName(text: String): Boolean {
         val trimmed = text.trim()
         if (trimmed.isBlank()) return true
-        val questionCount = trimmed.count { it == '?' || it == '？' || it == '\uFFFD' }
+        val questionCount = trimmed.count { it == '?' || it == '\uFF1F' || it == '\uFFFD' }
         if (questionCount <= 0) return false
         val visibleCount = trimmed.count { !it.isWhitespace() }
         if (visibleCount <= 0) return true
         val normalized = trimmed
             .replace("?", "")
-            .replace("？", "")
+            .replace("\uFF1F", "")
             .replace("\uFFFD", "")
             .replace(Regex("[\\s._-]"), "")
         if (normalized.isBlank()) return true
         return questionCount * 2 >= visibleCount
     }
 
+    private fun looksLikeMojibake(text: String): Boolean {
+        if (text.isBlank()) return false
+        if (text.contains('\uFFFD')) return true
+        var latin1Count = 0
+        var c1Count = 0
+        var mojibakeMarkerCount = 0
+        text.forEach { ch ->
+            when {
+                ch.code in 0x0080..0x009F -> c1Count += 1
+                ch.code in 0x00C0..0x00FF -> latin1Count += 1
+            }
+            if (
+                ch == '\u00C2' ||
+                ch == '\u00C3' ||
+                ch == '\u00C5' ||
+                ch == '\u00C6' ||
+                ch == '\u00D0' ||
+                ch == '\u00D1' ||
+                ch == '\u00E2' ||
+                ch == '\u00E3' ||
+                ch == '\u00E5' ||
+                ch == '\u00E6'
+            ) {
+                mojibakeMarkerCount += 1
+            }
+        }
+        return c1Count > 0 || mojibakeMarkerCount >= 1 || latin1Count >= 3
+    }
+
     private fun mojibakeScore(text: String): Int {
         if (text.isBlank()) return 0
         var score = 0
-        if (text.contains('\uFFFD')) score += 8
-        listOf("Ã", "Â", "æ", "å", "ç").forEach { token ->
-            score += text.split(token).size - 1
+        text.forEach { ch ->
+            when {
+                ch == '\uFFFD' -> score += 12
+                ch == '?' || ch == '\uFF1F' -> score += 2
+                ch.code in 0x0080..0x009F -> score += 8
+                ch.code in 0x00C0..0x00FF -> score += 1
+            }
+            if (
+                ch == '\u00C2' ||
+                ch == '\u00C3' ||
+                ch == '\u00C5' ||
+                ch == '\u00C6' ||
+                ch == '\u00D0' ||
+                ch == '\u00D1' ||
+                ch == '\u00E2' ||
+                ch == '\u00E3' ||
+                ch == '\u00E5' ||
+                ch == '\u00E6'
+            ) {
+                score += 3
+            }
         }
         return score
     }
 
-    private fun normalizeDisplayText(raw: String, fallback: String): String {
-        val trimmed = raw.trim().replace("\u0000", "")
+    private fun tryReDecodeAsUtf8(text: String, sourceCharset: Charset): String? {
+        if (!sourceCharset.newEncoder().canEncode(text)) return null
+        val repaired = runCatching {
+            String(text.toByteArray(sourceCharset), Charsets.UTF_8)
+        }.getOrNull() ?: return null
+        val normalized = repaired
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
+        if (normalized.isBlank() || normalized == text) return null
+        return normalized
+    }
+
+    internal fun normalizeDisplayText(raw: String, fallback: String): String {
+        val trimmed = raw
+            .replace("\u0000", "")
+            .trim()
+            .replace(Regex("\\s+"), " ")
         if (trimmed.isBlank()) return fallback
         if (!looksLikeMojibake(trimmed)) return trimmed
-        val repaired = runCatching {
-            String(trimmed.toByteArray(Charsets.ISO_8859_1), Charsets.UTF_8).trim()
-        }.getOrDefault(trimmed)
-        if (repaired.isBlank()) return fallback
-        return if (mojibakeScore(repaired) < mojibakeScore(trimmed)) repaired else trimmed
+
+        var best = trimmed
+        var bestScore = mojibakeScore(trimmed)
+
+        listOf(Charsets.ISO_8859_1, WINDOWS_1252).forEach { sourceCharset ->
+            var candidate = tryReDecodeAsUtf8(trimmed, sourceCharset)
+            var depth = 0
+            while (candidate != null && depth < 2) {
+                val candidateScore = mojibakeScore(candidate)
+                if (candidateScore < bestScore) {
+                    best = candidate
+                    bestScore = candidateScore
+                }
+                candidate = if (looksLikeMojibake(candidate)) {
+                    tryReDecodeAsUtf8(candidate, sourceCharset)
+                } else {
+                    null
+                }
+                depth += 1
+            }
+        }
+
+        return best.ifBlank { fallback }
+    }
+
+    private fun summarizeDisplayTextForLog(text: String): String {
+        val normalized = text.replace("\u0000", "\\0")
+        val visible = if (normalized.length > 32) {
+            normalized.take(32) + "..."
+        } else {
+            normalized
+        }
+        val codepoints = text.take(12).toCharArray().joinToString(" ") { ch -> "U+%04X".format(ch.code) }
+        return "\"$visible\" len=${text.length}${if (codepoints.isBlank()) "" else " $codepoints"}"
     }
 
     private fun pinKeyForPeer(peer: LanNeighborPeer): String {
@@ -1052,7 +1518,7 @@ object LocalSendProtocol {
         announce: Boolean? = null
     ): JSONObject {
         val obj = JSONObject()
-            .put("alias", buildLocalNeighborName())
+            .put("alias", buildLocalSendV2Name(context))
             .put("version", PROTOCOL_VERSION)
             .put("deviceModel", Build.MODEL?.trim().orEmpty().ifBlank { "Android" })
             .put("deviceType", DEVICE_TYPE)
@@ -1074,12 +1540,14 @@ object LocalSendProtocol {
     ): LocalSendPeer? {
         val ip = fallbackIp.trim()
         if (ip.isBlank()) return null
+        val rawDeviceModel = json.optString("deviceModel")
+        val rawAlias = json.optString("alias")
         val deviceModel = normalizeDisplayText(
-            raw = json.optString("deviceModel"),
+            raw = rawDeviceModel,
             fallback = ""
         )
         val aliasCandidate = normalizeDisplayText(
-            raw = json.optString("alias"),
+            raw = rawAlias,
             fallback = ""
         )
         val alias = when {
@@ -1087,6 +1555,16 @@ object LocalSendProtocol {
             looksLikeUnknownName(aliasCandidate) -> deviceModel.takeIf { !looksLikeUnknownName(it) && it.isNotBlank() }
                 ?: "LocalSend device"
             else -> aliasCandidate
+        }
+        if (!alias.equals(aliasCandidate) && aliasCandidate.isNotBlank()) {
+            runCatching {
+                Log.i(
+                    "LocalSendRuntime",
+                    "parsePeer fallback alias ip=$ip rawAlias=${summarizeDisplayTextForLog(rawAlias)} " +
+                        "alias=${summarizeDisplayTextForLog(aliasCandidate)} rawModel=${summarizeDisplayTextForLog(rawDeviceModel)} " +
+                        "model=${summarizeDisplayTextForLog(deviceModel)} final=${summarizeDisplayTextForLog(alias)}"
+                )
+            }
         }
         val protocol = json.optString("protocol")
             .trim()
@@ -1134,10 +1612,10 @@ object LocalSendProtocol {
         val body = runCatching {
             clientForScheme(scheme).newCall(request).execute().use { response ->
                 if (!response.isSuccessful) return null
-                response.body?.string().orEmpty()
+                response.body?.bytes()
             }
         }.getOrNull() ?: return null
-        val json = runCatching { JSONObject(body) }.getOrNull() ?: return null
+        val json = parseJsonObject(body) ?: return null
         return parsePeer(
             json = json,
             fallbackIp = ip,
@@ -1146,11 +1624,95 @@ object LocalSendProtocol {
         )
     }
 
+    fun fetchInfoAndParsePeer(
+        context: Context,
+        targetIp: String,
+        targetPort: Int,
+        targetProtocol: String
+    ): LocalSendPeer? {
+        val ip = targetIp.trim()
+        if (ip.isBlank()) return null
+        val scheme = if (targetProtocol.equals("https", true)) "https" else "http"
+        val localFingerprint = getOrCreateFingerprint(context)
+        val url = buildString {
+            append(scheme)
+            append("://")
+            append(NetworkUtils.formatHostForUrl(ip))
+            append(":")
+            append(targetPort.coerceIn(1, 65535))
+            append(LOCALSEND_API_PREFIX)
+            append("/info?fingerprint=")
+            append(URLEncoder.encode(localFingerprint, Charsets.UTF_8.name()))
+        }
+        val request = Request.Builder()
+            .url(url)
+            .get()
+            .build()
+        val body = runCatching {
+            clientForScheme(scheme).newCall(request).execute().use { response ->
+                if (!response.isSuccessful) return null
+                response.body?.bytes()
+            }
+        }.getOrNull() ?: return null
+        val json = parseJsonObject(body) ?: return null
+        return parsePeer(
+            json = json,
+            fallbackIp = ip,
+            fallbackPort = targetPort.coerceIn(1, 65535),
+            fallbackProtocol = scheme
+        )
+    }
+
+    internal fun refreshPeerDetails(
+        context: Context,
+        currentPeer: LocalSendPeer,
+        localPort: Int
+    ): LocalSendPeer? {
+        var best = currentPeer
+        var improved = false
+
+        schemeCandidates(currentPeer.protocol).forEach { scheme ->
+            val registerPeer = sendRegisterAndParsePeer(
+                context = context,
+                targetIp = currentPeer.ip,
+                targetPort = currentPeer.port,
+                targetProtocol = scheme,
+                localPort = localPort
+            )
+            if (registerPeer != null) {
+                val merged = mergePeer(best, registerPeer)
+                if (!samePeerDetails(best, merged)) {
+                    best = merged
+                    improved = true
+                }
+                if (!needsPeerDetailsRefresh(best)) return best
+            }
+
+            val infoPeer = fetchInfoAndParsePeer(
+                context = context,
+                targetIp = currentPeer.ip,
+                targetPort = currentPeer.port,
+                targetProtocol = scheme
+            )
+            if (infoPeer != null) {
+                val merged = mergePeer(best, infoPeer)
+                if (!samePeerDetails(best, merged)) {
+                    best = merged
+                    improved = true
+                }
+                if (!needsPeerDetailsRefresh(best)) return best
+            }
+        }
+
+        return best.takeIf { improved }
+    }
+
     suspend fun sendFilesToPeer(
         context: Context,
         peer: LanNeighborPeer,
         files: List<LocalSendSendFile>,
         pin: String? = null,
+        control: LocalSendSendControl? = null,
         isCancelled: () -> Boolean = { false },
         onProgress: (LocalSendSendProgress) -> Unit = {}
     ): Result<Unit> {
@@ -1185,6 +1747,10 @@ object LocalSendProtocol {
             )
         )
 
+        if (isSendCancelled(control, isCancelled)) {
+            return Result.failure(IOException("SEND_CANCELLED"))
+        }
+
         val prepared = prepareUpload(
             context = context,
             client = client,
@@ -1192,12 +1758,25 @@ object LocalSendProtocol {
             host = host,
             port = port,
             files = files,
-            pin = pin
+            pin = pin,
+            control = control
         ).getOrElse { return Result.failure(it) }
+
+        if (!prepared.uploadRequired) {
+            onProgress(
+                LocalSendSendProgress(
+                    progress = 1f,
+                    sentBytes = totalBytes,
+                    totalBytes = totalBytes,
+                    message = "LocalSend content delivered"
+                )
+            )
+            return Result.success(Unit)
+        }
 
         var finishedBytes = 0L
         files.forEachIndexed { index, file ->
-            if (isCancelled()) return Result.failure(IOException("SEND_CANCELLED"))
+            if (isSendCancelled(control, isCancelled)) return Result.failure(IOException("SEND_CANCELLED"))
             val token = prepared.tokens[file.id]
                 ?: return Result.failure(IOException("missing_token:${file.id}"))
             onProgress(
@@ -1219,7 +1798,8 @@ object LocalSendProtocol {
                 token = token,
                 completedBytesBefore = finishedBytes,
                 totalBytes = totalBytes,
-                isCancelled = isCancelled,
+                control = control,
+                isCancelled = { isSendCancelled(control, isCancelled) },
                 onProgress = onProgress
             )
             if (result.isFailure) {
@@ -1244,8 +1824,45 @@ object LocalSendProtocol {
 
     private data class PreparedUpload(
         val sessionId: String,
-        val tokens: Map<String, String>
+        val tokens: Map<String, String>,
+        val uploadRequired: Boolean
     )
+
+    private fun isSendCancelled(control: LocalSendSendControl?, isCancelled: () -> Boolean): Boolean {
+        return isCancelled() || control?.isCancelled() == true
+    }
+
+    private fun <T> executeTrackedCall(
+        client: OkHttpClient,
+        request: Request,
+        control: LocalSendSendControl?,
+        block: (okhttp3.Response) -> T
+    ): T {
+        val call = client.newCall(request)
+        control?.bind(call)
+        try {
+            return call.execute().use(block)
+        } finally {
+            control?.release(call)
+        }
+    }
+
+    internal fun classifyPrepareUploadFailure(statusCode: Int, responseText: String): IOException {
+        val trimmed = responseText.trim()
+        val normalized = trimmed.lowercase()
+        val code = when {
+            statusCode == 401 -> "AUTH_REQUIRED"
+            statusCode == 409 && normalized.contains("receiver_busy") -> "RECEIVER_BUSY"
+            statusCode == 403 && normalized.contains("receiver_disabled") -> "RECEIVER_DISABLED"
+            statusCode == 403 && normalized.contains("rejected") -> "REJECTED"
+            else -> null
+        }
+        return if (code != null) {
+            IOException(code)
+        } else {
+            IOException("prepare_upload_failed:$statusCode:${trimmed.take(200)}")
+        }
+    }
 
     private fun prepareUpload(
         context: Context,
@@ -1254,18 +1871,20 @@ object LocalSendProtocol {
         host: String,
         port: Int,
         files: List<LocalSendSendFile>,
-        pin: String?
+        pin: String?,
+        control: LocalSendSendControl?
     ): Result<PreparedUpload> {
         val filesJson = JSONObject()
         files.forEach { file ->
-            filesJson.put(
-                file.id,
-                JSONObject()
-                    .put("id", file.id)
-                    .put("fileName", file.fileName)
-                    .put("size", file.size.coerceAtLeast(0L))
-                    .put("fileType", file.mimeType.ifBlank { "application/octet-stream" })
-            )
+            val fileJson = JSONObject()
+                .put("id", file.id)
+                .put("fileName", file.fileName)
+                .put("size", file.size.coerceAtLeast(0L))
+                .put("fileType", file.mimeType.ifBlank { "application/octet-stream" })
+            file.previewText?.takeIf { it.isNotBlank() }?.let { preview ->
+                fileJson.put("preview", preview)
+            }
+            filesJson.put(file.id, fileJson)
         }
         val payload = JSONObject()
             .put("info", buildDeviceInfoJson(context, LOCALSEND_PORT, protocol = "http", announce = false))
@@ -1287,12 +1906,26 @@ object LocalSendProtocol {
             .post(payload.toRequestBody(JSON_MEDIA_TYPE))
             .build()
         return runCatching {
-            client.newCall(request).execute().use { response ->
+            executeTrackedCall(client, request, control) { response ->
                 if (!response.isSuccessful) {
                     val text = response.body?.string().orEmpty()
-                    throw IOException("prepare_upload_failed:${response.code}:${text.take(200)}")
+                    throw classifyPrepareUploadFailure(response.code, text)
+                }
+                if (response.code == 204) {
+                    return@executeTrackedCall PreparedUpload(
+                        sessionId = "",
+                        tokens = emptyMap(),
+                        uploadRequired = false
+                    )
                 }
                 val text = response.body?.string().orEmpty()
+                if (text.isBlank()) {
+                    return@executeTrackedCall PreparedUpload(
+                        sessionId = "",
+                        tokens = emptyMap(),
+                        uploadRequired = false
+                    )
+                }
                 val json = JSONObject(text)
                 val sessionId = json.optString("sessionId").trim()
                 if (sessionId.isBlank()) throw IOException("missing_session_id")
@@ -1305,7 +1938,11 @@ object LocalSendProtocol {
                         if (token.isNotBlank()) put(key, token)
                     }
                 }
-                PreparedUpload(sessionId = sessionId, tokens = tokens)
+                PreparedUpload(
+                    sessionId = sessionId,
+                    tokens = tokens,
+                    uploadRequired = tokens.isNotEmpty()
+                )
             }
         }
     }
@@ -1321,35 +1958,46 @@ object LocalSendProtocol {
         token: String,
         completedBytesBefore: Long,
         totalBytes: Long,
+        control: LocalSendSendControl?,
         isCancelled: () -> Boolean,
         onProgress: (LocalSendSendProgress) -> Unit
     ): Result<Unit> {
         val url = "$scheme://$host:$port$LOCALSEND_API_PREFIX/upload" +
             "?sessionId=$sessionId&fileId=${file.id}&token=$token"
-        val reqBody = ContentUriRequestBody(
-            context = context,
-            uri = file.uri,
-            mimeType = file.mimeType,
-            length = file.size,
-            onBytes = { current ->
-                val sent = (completedBytesBefore + current).coerceAtMost(totalBytes)
-                onProgress(
-                    LocalSendSendProgress(
-                        progress = (sent.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f),
-                        sentBytes = sent,
-                        totalBytes = totalBytes,
-                        message = "Uploading ${file.fileName}"
-                    )
+        val progressCallback: (Long) -> Unit = { current ->
+            val sent = (completedBytesBefore + current).coerceAtMost(totalBytes)
+            onProgress(
+                LocalSendSendProgress(
+                    progress = (sent.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f),
+                    sentBytes = sent,
+                    totalBytes = totalBytes,
+                    message = "Uploading ${file.fileName}"
                 )
-            },
-            isCancelled = isCancelled
-        )
+            )
+        }
+        val reqBody = if (file.inlineBytes != null) {
+            ByteArrayProgressRequestBody(
+                bytes = file.inlineBytes,
+                mimeType = file.mimeType,
+                onBytes = progressCallback,
+                isCancelled = isCancelled
+            )
+        } else {
+            ContentUriRequestBody(
+                context = context,
+                uri = file.uri ?: throw IOException("missing_uri:${file.id}"),
+                mimeType = file.mimeType,
+                length = file.size,
+                onBytes = progressCallback,
+                isCancelled = isCancelled
+            )
+        }
         val request = Request.Builder()
             .url(url)
             .post(reqBody)
             .build()
         return runCatching {
-            client.newCall(request).execute().use { response ->
+            executeTrackedCall(client, request, control) { response ->
                 if (!response.isSuccessful) {
                     val text = response.body?.string().orEmpty()
                     throw IOException("upload_failed:${response.code}:${text.take(200)}")
@@ -1409,4 +2057,28 @@ object LocalSendProtocol {
             } ?: throw IOException("cannot_open_input_stream")
         }
     }
+
+    private class ByteArrayProgressRequestBody(
+        private val bytes: ByteArray,
+        private val mimeType: String,
+        private val onBytes: (Long) -> Unit,
+        private val isCancelled: () -> Boolean
+    ) : RequestBody() {
+        override fun contentType() = mimeType.ifBlank { "application/octet-stream" }.toMediaTypeOrNull()
+
+        override fun contentLength(): Long = bytes.size.toLong()
+
+        override fun writeTo(sink: BufferedSink) {
+            val chunkSize = 64 * 1024
+            var offset = 0
+            while (offset < bytes.size) {
+                if (isCancelled()) throw IOException("SEND_CANCELLED")
+                val next = minOf(offset + chunkSize, bytes.size)
+                sink.write(bytes, offset, next - offset)
+                offset = next
+                onBytes(offset.toLong())
+            }
+        }
+    }
 }
+

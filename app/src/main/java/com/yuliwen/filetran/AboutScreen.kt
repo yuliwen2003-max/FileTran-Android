@@ -43,6 +43,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
@@ -85,7 +86,12 @@ fun AboutScreen() {
     var globalSuperKeepAliveEnabled by remember {
         mutableStateOf(keepAlivePrefs.getBoolean(APP_KEEP_ALIVE_KEY_SUPER_MODE, false))
     }
-    var keepAliveCardExpanded by remember { mutableStateOf(true) }
+    var appInfoCardExpanded by remember { mutableStateOf(false) }
+    var uiScaleCardExpanded by remember { mutableStateOf(false) }
+    var transferCardExpanded by remember { mutableStateOf(false) }
+    var neighborCardExpanded by remember { mutableStateOf(false) }
+    var keepAliveCardExpanded by remember { mutableStateOf(false) }
+    var stunCardExpanded by remember { mutableStateOf(false) }
     var uiScale by remember {
         mutableStateOf(uiScalePrefs.getFloat(UI_SCALE_KEY, UI_SCALE_DEFAULT).coerceIn(UI_SCALE_MIN, UI_SCALE_MAX))
     }
@@ -103,8 +109,17 @@ fun AboutScreen() {
         mutableStateOf(NetworkUtils.getStunServerSettings(context))
     }
     var stunConfigStatus by remember { mutableStateOf<String?>(null) }
+    var neighborSettings by remember { mutableStateOf(NeighborDiscoverySettingsStore.get(context)) }
+    var deviceAliasInput by remember { mutableStateOf(neighborSettings.deviceAlias) }
+    var shareFixedPortInput by remember { mutableStateOf(neighborSettings.shareFixedPort.toString()) }
     val stunProbeStatus = remember { mutableStateMapOf<String, String>() }
     val scope = rememberCoroutineScope()
+    val defaultDeviceAlias = remember { buildLocalNeighborName() }
+    val appVersionName = remember(context) {
+        runCatching {
+            context.packageManager.getPackageInfo(context.packageName, 0).versionName.orEmpty().ifBlank { "1.2" }
+        }.getOrDefault("1.2")
+    }
 
     fun groupEntries(type: StunGroupType): List<StunServerDefinition> {
         return when (type) {
@@ -223,6 +238,9 @@ fun AboutScreen() {
                 overlayPermissionGranted = isOverlayPermissionGranted(context)
                 notificationPermissionGranted = isNotificationPermissionGranted(context)
                 stunSettings = NetworkUtils.getStunServerSettings(context)
+                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                deviceAliasInput = neighborSettings.deviceAlias
+                shareFixedPortInput = neighborSettings.shareFixedPort.toString()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -387,32 +405,47 @@ fun AboutScreen() {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(20.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(12.dp)
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                appIconBitmap?.let { bitmap ->
-                    Image(
-                        bitmap = bitmap,
-                        contentDescription = "app_icon",
-                        modifier = Modifier.fillMaxWidth(0.35f)
-                    )
-                }
-                Text("速传", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                Text("版本：1.0beta")
-                Text("作者：嘻嘻")
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    "声明：本软件仅用于合法用途，严禁用于任何违法行为。",
-                    color = MaterialTheme.colorScheme.error,
-                    fontSize = 12.sp
-                )
-                Spacer(modifier = Modifier.height(4.dp))
-                Button(
-                    onClick = { showOpenSourceNotice = true },
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("开源声明")
+                    Text("开源声明", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { appInfoCardExpanded = !appInfoCardExpanded }) {
+                        Text(if (appInfoCardExpanded) "收起" else "展开")
+                    }
+                }
+                if (appInfoCardExpanded) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        appIconBitmap?.let { bitmap ->
+                            Image(
+                                bitmap = bitmap,
+                                contentDescription = "app_icon",
+                                modifier = Modifier.fillMaxWidth(0.16f)
+                            )
+                        }
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("速传", fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                            Text("版本：V$appVersionName · 作者：嘻嘻", fontSize = 12.sp)
+                        }
+                    }
+                    Text(
+                        "声明：本软件仅用于合法用途，严禁用于任何违法行为。",
+                        color = MaterialTheme.colorScheme.error,
+                        fontSize = 12.sp
+                    )
+                    Button(
+                        onClick = { showOpenSourceNotice = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("查看开源声明")
+                    }
                 }
             }
         }
@@ -427,31 +460,420 @@ fun AboutScreen() {
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("页面缩放", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("传输设置", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { transferCardExpanded = !transferCardExpanded }) {
+                        Text(if (transferCardExpanded) "收起" else "展开")
+                    }
+                }
                 Text(
-                    "用于调节整个应用页面的显示大小。小屏设备可适当调小，避免内容显示不全。",
+                    "当前端口策略：${if (neighborSettings.shareRandomPort) "随机端口" else "固定端口 ${neighborSettings.shareFixedPort}"}",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 12.sp
                 )
-                Text("当前缩放：${(uiScale * 100).toInt()}%")
-                Slider(
-                    value = uiScale,
-                    onValueChange = { value ->
-                        val normalized = value.coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)
-                        uiScale = normalized
-                        uiScalePrefs.edit().putFloat(UI_SCALE_KEY, normalized).apply()
-                    },
-                    valueRange = UI_SCALE_MIN..UI_SCALE_MAX,
-                    steps = 9
-                )
-                OutlinedButton(
-                    onClick = {
-                        uiScale = UI_SCALE_DEFAULT
-                        uiScalePrefs.edit().putFloat(UI_SCALE_KEY, UI_SCALE_DEFAULT).apply()
-                    },
-                    modifier = Modifier.fillMaxWidth()
+                if (transferCardExpanded) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("每次分享使用随机端口", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = neighborSettings.shareRandomPort,
+                            onCheckedChange = { checked ->
+                                NeighborDiscoverySettingsStore.setShareRandomPort(context, checked)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                shareFixedPortInput = neighborSettings.shareFixedPort.toString()
+                            }
+                        )
+                    }
+                    OutlinedTextField(
+                        value = shareFixedPortInput,
+                        onValueChange = { shareFixedPortInput = it.filter(Char::isDigit).take(5) },
+                        label = { Text("固定端口") },
+                        singleLine = true,
+                        enabled = !neighborSettings.shareRandomPort,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                shareFixedPortInput = DEFAULT_SHARE_PORT.toString()
+                                NeighborDiscoverySettingsStore.setShareFixedPort(context, DEFAULT_SHARE_PORT)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                shareFixedPortInput = neighborSettings.shareFixedPort.toString()
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("恢复默认")
+                        }
+                        Button(
+                            onClick = {
+                                val parsed = shareFixedPortInput.toIntOrNull()
+                                if (parsed != null) {
+                                    NeighborDiscoverySettingsStore.setShareFixedPort(context, parsed)
+                                    neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                    shareFixedPortInput = neighborSettings.shareFixedPort.toString()
+                                }
+                            },
+                            enabled = shareFixedPortInput.toIntOrNull() != null,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("保存端口")
+                        }
+                    }
+                    Text(
+                        "主页面只展示当前使用的端口；是否随机和固定端口值在这里统一控制。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("恢复默认缩放")
+                    Text("页面缩放", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { uiScaleCardExpanded = !uiScaleCardExpanded }) {
+                        Text(if (uiScaleCardExpanded) "收起" else "展开")
+                    }
+                }
+                if (uiScaleCardExpanded) {
+                    Text(
+                        "用于调节整个应用页面的显示大小。小屏设备可适当调小，避免内容显示不全。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                    Text("当前缩放：${(uiScale * 100).toInt()}%")
+                    Slider(
+                        value = uiScale,
+                        onValueChange = { value ->
+                            val normalized = value.coerceIn(UI_SCALE_MIN, UI_SCALE_MAX)
+                            uiScale = normalized
+                            uiScalePrefs.edit().putFloat(UI_SCALE_KEY, normalized).apply()
+                        },
+                        valueRange = UI_SCALE_MIN..UI_SCALE_MAX,
+                        steps = 9
+                    )
+                    OutlinedButton(
+                        onClick = {
+                            uiScale = UI_SCALE_DEFAULT
+                            uiScalePrefs.edit().putFloat(UI_SCALE_KEY, UI_SCALE_DEFAULT).apply()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("恢复默认缩放")
+                    }
+                }
+            }
+        }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text("邻居发现", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { neighborCardExpanded = !neighborCardExpanded }) {
+                        Text(if (neighborCardExpanded) "收起" else "展开")
+                    }
+                }
+                if (neighborCardExpanded) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("启用邻居发现", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = neighborSettings.enabled,
+                            onCheckedChange = { checked ->
+                                NeighborDiscoverySettingsStore.setEnabled(context, checked)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+                            }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("启用 LocalSendV2 协议", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = neighborSettings.localSendV2Enabled,
+                            onCheckedChange = { checked ->
+                                NeighborDiscoverySettingsStore.setLocalSendV2Enabled(context, checked)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+                            }
+                        )
+                    }
+                    OutlinedTextField(
+                        value = deviceAliasInput,
+                        onValueChange = { deviceAliasInput = it },
+                        label = { Text("设备对外显示名称") },
+                        placeholder = { Text(defaultDeviceAlias) },
+                        singleLine = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        "这个名称会显示在其他 FileTran / LocalSend 设备里；留空则使用默认机型名：$defaultDeviceAlias",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                deviceAliasInput = ""
+                                NeighborDiscoverySettingsStore.setDeviceAlias(context, "")
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                deviceAliasInput = neighborSettings.deviceAlias
+                                LocalSendRuntimeBridge.announceNow()
+                                NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("恢复默认")
+                        }
+                        Button(
+                            onClick = {
+                                NeighborDiscoverySettingsStore.setDeviceAlias(context, deviceAliasInput)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                deviceAliasInput = neighborSettings.deviceAlias
+                                LocalSendRuntimeBridge.announceNow()
+                                NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("保存名称")
+                        }
+                    }
+                    Text(
+                        "当前 FileTran / LocalSend 对外显示名称：${buildLocalNeighborName(context)}",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("后台增强（悬浮接收框）", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = neighborSettings.backgroundEnhanced,
+                            onCheckedChange = { checked ->
+                                NeighborDiscoverySettingsStore.setBackgroundEnhanced(context, checked)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+                                if (checked) {
+                                    requestBackgroundPopupPermission(context)
+                                }
+                            }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("后台默认接收不弹窗", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = neighborSettings.backgroundAutoReceiveNoPrompt,
+                            onCheckedChange = { checked ->
+                                NeighborDiscoverySettingsStore.setBackgroundAutoReceiveNoPrompt(context, checked)
+                                neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+                            }
+                        )
+                    }
+                    Text(
+                        "开启后后台收到请求会直接接收且不弹确认框，接收完成后仍会弹出完成通知（Android 14 推荐）。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("后台无限制（电池优化）", modifier = Modifier.weight(1f))
+                        Switch(
+                            checked = batteryOptimizationIgnored,
+                            onCheckedChange = { checked ->
+                                if (checked) {
+                                    requestIgnoreBatteryOptimization(context)
+                                } else {
+                                    openBatteryOptimizationSettings(context)
+                                }
+                            }
+                        )
+                    }
+                    Text(
+                        if (batteryOptimizationIgnored) {
+                            "后台无限制：已开启"
+                        } else {
+                            "后台无限制：未开启，建议开启以避免后台邻居监听被系统回收"
+                        },
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        "开启后会以前台服务在后台保持邻居发现；收到请求时弹出居中悬浮接收框，支持倒计时自动处理、接收进度、隐藏与取消。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        Text(
+                            if (overlayPermissionGranted) {
+                                "悬浮窗权限：已授权"
+                            } else {
+                                "悬浮窗权限：未授权（后台增强将无法显示悬浮接收框）"
+                            },
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp
+                        )
+                        OutlinedButton(
+                            onClick = { requestOverlayPermission(context) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("打开悬浮窗权限设置")
+                        }
+                    }
+                    Text(
+                        "后台弹出界面权限：部分系统（如 MIUI）需要额外允许“后台弹出界面/后台显示弹窗”，否则后台无法直接弹窗。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                    OutlinedButton(
+                        onClick = { requestBackgroundPopupPermission(context) },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("打开后台弹窗权限设置")
+                    }
+                    if (!notificationPermissionGranted) {
+                        Text(
+                            "通知权限：未授权（后台增强前台通知可能无法显示）",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp
+                        )
+                        OutlinedButton(
+                            onClick = {
+                                requestNotificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                            },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text("申请通知权限")
+                        }
+                    }
+                    Text(
+                        "接收到文件请求后的默认处理",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (neighborSettings.defaultAction == NeighborDefaultAction.REJECT) {
+                            Button(
+                                onClick = {},
+                                modifier = Modifier.weight(1f)
+                            ) { Text("默认拒绝") }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    NeighborDiscoverySettingsStore.setDefaultAction(context, NeighborDefaultAction.REJECT)
+                                    neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("默认拒绝") }
+                        }
+                        if (neighborSettings.defaultAction == NeighborDefaultAction.ACCEPT) {
+                            Button(
+                                onClick = {},
+                                modifier = Modifier.weight(1f)
+                            ) { Text("默认接收") }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    NeighborDiscoverySettingsStore.setDefaultAction(context, NeighborDefaultAction.ACCEPT)
+                                    neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("默认接收") }
+                        }
+                    }
+                    OutlinedTextField(
+                        value = neighborSettings.timeoutSeconds.toString(),
+                        onValueChange = { value ->
+                            val parsed = value.filter(Char::isDigit).toIntOrNull() ?: 0
+                            NeighborDiscoverySettingsStore.setTimeoutSeconds(context, parsed)
+                            neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                        },
+                        label = { Text("倒计时（秒）") },
+                        placeholder = { Text("0-25，0 表示直接执行默认操作") },
+                        singleLine = true,
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        "二维码分享页默认子页面",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        if (neighborSettings.qrDefaultPage == 0) {
+                            Button(onClick = {}, modifier = Modifier.weight(1f)) { Text("二维码") }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    NeighborDiscoverySettingsStore.setQrDefaultPage(context, 0)
+                                    neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("二维码") }
+                        }
+                        if (neighborSettings.qrDefaultPage == 1) {
+                            Button(onClick = {}, modifier = Modifier.weight(1f)) { Text("自动发现") }
+                        } else {
+                            OutlinedButton(
+                                onClick = {
+                                    NeighborDiscoverySettingsStore.setQrDefaultPage(context, 1)
+                                    neighborSettings = NeighborDiscoverySettingsStore.get(context)
+                                },
+                                modifier = Modifier.weight(1f)
+                            ) { Text("自动发现") }
+                        }
+                    }
                 }
             }
         }
@@ -587,17 +1009,27 @@ fun AboutScreen() {
                     .padding(20.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text("STUN 服务器自定义", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-                Text(
-                    "迁移到二级页面管理，支持按 IPv4/IPv6 + TCP/UDP 分组维护列表、实时探测、保存与恢复默认。",
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    fontSize = 12.sp
-                )
-                Button(
-                    onClick = { showStunSettingsPage = true },
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("进入 STUN 自定义页面")
+                    Text("STUN 服务器自定义", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                    OutlinedButton(onClick = { stunCardExpanded = !stunCardExpanded }) {
+                        Text(if (stunCardExpanded) "收起" else "展开")
+                    }
+                }
+                if (stunCardExpanded) {
+                    Text(
+                        "迁移到二级页面管理，支持按 IPv4/IPv6 + TCP/UDP 分组维护列表、实时探测、保存与恢复默认。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                    Button(
+                        onClick = { showStunSettingsPage = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("进入 STUN 自定义页面")
+                    }
                 }
             }
         }
@@ -736,6 +1168,22 @@ private fun requestIgnoreBatteryOptimization(context: Context) {
     }
 }
 
+private fun openBatteryOptimizationSettings(context: Context) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    val packageUri = Uri.parse("package:${context.packageName}")
+    val appDetails = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    val fallbackIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    if (appDetails.resolveActivity(context.packageManager) != null) {
+        context.startActivity(appDetails)
+    } else {
+        context.startActivity(fallbackIntent)
+    }
+}
+
 private fun requestOverlayPermission(context: Context) {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
     val intent = Intent(
@@ -745,4 +1193,37 @@ private fun requestOverlayPermission(context: Context) {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     context.startActivity(intent)
+}
+
+private fun requestBackgroundPopupPermission(context: Context) {
+    val packageName = context.packageName
+    val packageUri = Uri.parse("package:$packageName")
+    val intents = listOf(
+        Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+            setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.PermissionsEditorActivity")
+            putExtra("extra_pkgname", packageName)
+            putExtra("packageName", packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+        Intent("miui.intent.action.APP_PERM_EDITOR").apply {
+            setClassName("com.miui.securitycenter", "com.miui.permcenter.permissions.AppPermissionsEditorActivity")
+            putExtra("extra_pkgname", packageName)
+            putExtra("packageName", packageName)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+        Intent("miui.intent.action.OP_AUTO_START").apply {
+            setClassName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+        Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, packageUri).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        }
+    )
+    val packageManager = context.packageManager
+    val target = intents.firstOrNull { intent ->
+        intent.resolveActivity(packageManager) != null
+    } ?: Intent(Settings.ACTION_SETTINGS).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    runCatching { context.startActivity(target) }
 }

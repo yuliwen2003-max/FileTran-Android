@@ -24,9 +24,13 @@ import android.nfc.NfcAdapter
 import android.nfc.Tag
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.InputType
 import android.util.Log
+import android.widget.EditText
 import android.widget.Toast
 import android.webkit.MimeTypeMap
 import androidx.activity.ComponentActivity
@@ -38,8 +42,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.border
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -103,6 +109,8 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -111,6 +119,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.geometry.Offset
@@ -129,6 +138,10 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.FileProvider
 import androidx.core.content.ContextCompat
+import androidx.documentfile.provider.DocumentFile
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.yuliwen.filetran.airgap.AirGapSender
 import com.yuliwen.filetran.ui.theme.FileTranTheme
 import fi.iki.elonen.NanoHTTPD
@@ -139,8 +152,10 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.asCoroutineDispatcher
+import kotlin.coroutines.resume
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -152,13 +167,16 @@ import java.net.HttpURLConnection
 import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
 import java.net.URLConnection
 import java.net.URLEncoder
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.math.roundToInt
@@ -176,6 +194,26 @@ data class ShareEndpoint(
     val listenPort: Int,
     val note: String? = null
 )
+
+data class FileTransferScreenArgs(
+    val initialFileUri: Uri?,
+    val initialSharedText: String?,
+    val onFileSelected: (Uri, String, String, Int) -> Unit,
+    val onFilesSelected: (List<ShareFileSpec>) -> Unit,
+    val onStopServer: () -> Unit,
+    val allowedFileSendFlags: Int,
+    val initialFileSendType: Int,
+    val onBack: (() -> Unit)?,
+    val onSecondaryPageVisibleChanged: ((Boolean) -> Unit)?,
+    val onInitialFileConsumed: () -> Unit,
+    val onInitialTextConsumed: () -> Unit,
+    val onRequestOpenEnhancedReceive: (Boolean) -> Unit
+)
+
+private const val FILE_SEND_FLAG_NORMAL = 1 shl 0
+private const val FILE_SEND_FLAG_CIMBAR = 1 shl 1
+private const val FILE_SEND_FLAG_SSTV = 1 shl 2
+private const val FILE_SEND_FLAGS_ALL = FILE_SEND_FLAG_NORMAL or FILE_SEND_FLAG_CIMBAR or FILE_SEND_FLAG_SSTV
 
 private data class ShareEndpointProbeResult(
     val localHost: String,
@@ -214,10 +252,66 @@ private class ReversePushSendControl {
     val cancelled = AtomicBoolean(false)
 }
 
+private data class QuickInviteReverseTask(
+    val requestId: String,
+    val endpoint: String,
+    val files: List<Triple<Uri, String, String>>
+)
+
+private data class LocalSendDraftItem(
+    val uri: Uri? = null,
+    val fileName: String,
+    val mimeType: String,
+    val size: Long,
+    val inlineBytes: ByteArray? = null,
+    val previewText: String? = null
+)
+
+private data class ForegroundLocalSendReceiveSheetState(
+    val requestId: String,
+    val senderAlias: String,
+    val senderIp: String,
+    val firstFileName: String,
+    val fileCount: Int,
+    val totalSize: Long,
+    val defaultAccept: Boolean,
+    val timeoutSeconds: Int,
+    val decisionDeadlineAtMs: Long,
+    val countdownSeconds: Int,
+    val awaitingDecision: Boolean,
+    val accepted: Boolean,
+    val statusText: String,
+    val lastFileName: String = "",
+    val failureMessage: String = "",
+    val cancelledBySender: Boolean = false,
+    val messageReceived: Boolean = false
+)
+
 private class MainShareStunProbeControl {
     val requestStopEarly = AtomicBoolean(false)
     val requestDisableNat = AtomicBoolean(false)
     val successCount = AtomicInteger(0)
+}
+
+private fun formatTransferBytes(bytes: Long): String {
+    return when {
+        bytes <= 0L -> "0 B"
+        bytes < 1024L -> "$bytes B"
+        bytes < 1024L * 1024L -> String.format("%.2f KB", bytes / 1024.0)
+        bytes < 1024L * 1024L * 1024L -> String.format("%.2f MB", bytes / (1024.0 * 1024.0))
+        else -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+private fun describeLocalSendReceiveFailure(code: String): String {
+    return when (code.trim()) {
+        "sender_cancelled" -> "发送方已取消本次传输。"
+        "network_interrupted" -> "接收已中断，网络连接已断开。"
+        "write_failed" -> "文件写入失败。"
+        "empty_body" -> "发送方没有传输有效内容。"
+        "size_mismatch" -> "文件大小与声明信息不一致。"
+        else -> if (code.isBlank()) "接收失败。" else "接收失败：$code"
+    }
 }
 
 private const val MULTI_SHARE_PAYLOAD_TYPE = "filetran_multi_download_v2"
@@ -343,6 +437,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     initialFileUri: Uri?,
@@ -390,10 +485,192 @@ fun MainScreen(
     var pendingNavTarget by remember { mutableStateOf<Int?>(null) }
     var pendingNavAtMs by remember { mutableStateOf(0L) }
     var pendingEnhancedReceiveMode by remember { mutableIntStateOf(0) } // 0:none 4:ipv4 6:ipv6
+    var pendingQuickSendInvite by remember { mutableStateOf<QuickSendInvite?>(null) }
+    var pendingQuickSendCancelId by remember { mutableStateOf<String?>(null) }
+    val initialNeighborSettings = remember { NeighborDiscoverySettingsStore.get(context) }
+    var neighborDiscoveryEnabled by remember { mutableStateOf(initialNeighborSettings.enabled) }
+    var localSendV2Enabled by remember { mutableStateOf(initialNeighborSettings.localSendV2Enabled) }
+    var appInForeground by remember { mutableStateOf(true) }
+    val lifecycleOwner = LocalLifecycleOwner.current
     val tabStateHolder = rememberSaveableStateHolder()
     val pagerState = rememberPagerState(initialPage = if (shouldOpenSpeedTestByDefault) 2 else 0) { 5 }
     val scope = rememberCoroutineScope()
     val selectedTab = pagerState.currentPage
+    var foregroundLocalSendSheetState by remember { mutableStateOf<ForegroundLocalSendReceiveSheetState?>(null) }
+    var foregroundLocalSendResolveDecision by remember { mutableStateOf<((Boolean) -> Unit)?>(null) }
+    val foregroundLocalSendFileSizes = remember { mutableStateMapOf<String, Long>() }
+    val foregroundLocalSendReceivedBytes = remember { mutableStateMapOf<String, Long>() }
+    val foregroundLocalSendCompletedFiles = remember { mutableStateMapOf<String, Boolean>() }
+
+    fun clearForegroundLocalSendSheet() {
+        foregroundLocalSendResolveDecision = null
+        foregroundLocalSendSheetState = null
+        foregroundLocalSendFileSizes.clear()
+        foregroundLocalSendReceivedBytes.clear()
+        foregroundLocalSendCompletedFiles.clear()
+    }
+
+    fun isForegroundLocalSendInteractionActive(): Boolean {
+        val current = foregroundLocalSendSheetState ?: return false
+        val completedCount = foregroundLocalSendCompletedFiles.values.count { it }
+        val allCompleted = current.fileCount > 0 && completedCount >= current.fileCount
+        return current.awaitingDecision ||
+            (current.accepted &&
+                current.failureMessage.isBlank() &&
+                !current.cancelledBySender &&
+                !current.messageReceived &&
+                !allCompleted)
+    }
+
+    fun updateForegroundLocalSendSheet(event: LocalSendReceiveEvent) {
+        if (event.stage == LocalSendReceiveStage.MESSAGE_RECEIVED) {
+            val text = event.textContent.ifBlank { event.message }
+            if (text.isNotBlank()) {
+                copyPlainTextToClipboard(
+                    context = context,
+                    label = if (event.fileName.startsWith("clipboard_", ignoreCase = true)) {
+                        "localsend_clipboard"
+                    } else {
+                        "localsend_text"
+                    },
+                    text = text
+                )
+                if (foregroundLocalSendSheetState == null) {
+                    Toast.makeText(context, "LocalSend 文本已复制到剪贴板。", Toast.LENGTH_SHORT).show()
+                    return
+                }
+            }
+        }
+        val current = foregroundLocalSendSheetState ?: return
+        if (current.requestId.isNotBlank() && current.requestId != event.sessionId) {
+            return
+        }
+        val nextAlias = event.senderAlias.ifBlank { current.senderAlias }
+        val nextIp = event.senderIp.ifBlank { current.senderIp }
+        when (event.stage) {
+            LocalSendReceiveStage.STARTED -> {
+                if (event.fileId.isNotBlank()) {
+                    foregroundLocalSendFileSizes[event.fileId] = event.fileSize.coerceAtLeast(0L)
+                    foregroundLocalSendReceivedBytes.putIfAbsent(event.fileId, 0L)
+                    foregroundLocalSendCompletedFiles[event.fileId] = false
+                }
+                foregroundLocalSendResolveDecision = null
+                foregroundLocalSendSheetState = current.copy(
+                    senderAlias = nextAlias,
+                    senderIp = nextIp,
+                    accepted = true,
+                    awaitingDecision = false,
+                    statusText = "正在等待发送端开始传输...",
+                    lastFileName = event.fileName.ifBlank { current.lastFileName },
+                    failureMessage = "",
+                    cancelledBySender = false,
+                    messageReceived = false
+                )
+            }
+
+            LocalSendReceiveStage.PROGRESS -> {
+                val knownSize = maxOf(
+                    event.fileSize.coerceAtLeast(0L),
+                    foregroundLocalSendFileSizes[event.fileId] ?: 0L
+                )
+                val received = event.receivedBytes.coerceAtLeast(0L)
+                foregroundLocalSendFileSizes[event.fileId] = knownSize
+                foregroundLocalSendReceivedBytes[event.fileId] = maxOf(
+                    foregroundLocalSendReceivedBytes[event.fileId] ?: 0L,
+                    if (knownSize > 0L) received.coerceAtMost(knownSize) else received
+                )
+                if (knownSize > 0L && (foregroundLocalSendReceivedBytes[event.fileId] ?: 0L) >= knownSize) {
+                    foregroundLocalSendCompletedFiles[event.fileId] = true
+                }
+                foregroundLocalSendSheetState = current.copy(
+                    senderAlias = nextAlias,
+                    senderIp = nextIp,
+                    accepted = true,
+                    awaitingDecision = false,
+                    statusText = if (event.fileName.isNotBlank()) {
+                        "正在接收 ${event.fileName}"
+                    } else {
+                        "正在接收文件..."
+                    },
+                    lastFileName = event.fileName.ifBlank { current.lastFileName },
+                    failureMessage = "",
+                    cancelledBySender = false,
+                    messageReceived = false
+                )
+            }
+
+            LocalSendReceiveStage.COMPLETED -> {
+                val finalSize = maxOf(
+                    event.fileSize.coerceAtLeast(0L),
+                    foregroundLocalSendFileSizes[event.fileId] ?: 0L,
+                    foregroundLocalSendReceivedBytes[event.fileId] ?: 0L
+                )
+                foregroundLocalSendFileSizes[event.fileId] = finalSize
+                foregroundLocalSendReceivedBytes[event.fileId] = finalSize
+                foregroundLocalSendCompletedFiles[event.fileId] = true
+                val completedCount = foregroundLocalSendCompletedFiles.values.count { it }
+                val doneAll = current.fileCount > 0 && completedCount >= current.fileCount
+                foregroundLocalSendSheetState = current.copy(
+                    senderAlias = nextAlias,
+                    senderIp = nextIp,
+                    accepted = true,
+                    awaitingDecision = false,
+                    statusText = if (doneAll) {
+                        "已接收完成"
+                    } else {
+                        "已完成 $completedCount/${current.fileCount} 个文件"
+                    },
+                    lastFileName = event.fileName.ifBlank { current.lastFileName },
+                    failureMessage = "",
+                    cancelledBySender = false,
+                    messageReceived = false
+                )
+            }
+
+            LocalSendReceiveStage.MESSAGE_RECEIVED -> {
+                foregroundLocalSendResolveDecision = null
+                foregroundLocalSendSheetState = current.copy(
+                    senderAlias = nextAlias,
+                    senderIp = nextIp,
+                    accepted = true,
+                    awaitingDecision = false,
+                    statusText = "文本已复制到剪贴板。",
+                    lastFileName = event.fileName.ifBlank { current.lastFileName },
+                    failureMessage = "",
+                    cancelledBySender = false,
+                    messageReceived = true
+                )
+            }
+
+            LocalSendReceiveStage.FAILED -> {
+                val message = describeLocalSendReceiveFailure(event.message)
+                foregroundLocalSendSheetState = current.copy(
+                    senderAlias = nextAlias,
+                    senderIp = nextIp,
+                    accepted = true,
+                    awaitingDecision = false,
+                    statusText = message,
+                    lastFileName = event.fileName.ifBlank { current.lastFileName },
+                    failureMessage = message,
+                    cancelledBySender = false,
+                    messageReceived = false
+                )
+            }
+
+            LocalSendReceiveStage.CANCELLED -> {
+                foregroundLocalSendSheetState = current.copy(
+                    senderAlias = nextAlias,
+                    senderIp = nextIp,
+                    accepted = true,
+                    awaitingDecision = false,
+                    statusText = "发送方已取消本次传输。",
+                    failureMessage = "",
+                    cancelledBySender = true,
+                    messageReceived = false
+                )
+            }
+        }
+    }
     val currentTabHasProtectedContent = when (selectedTab) {
         0 -> sendSecondaryOpen
         1 -> receiveSecondaryOpen
@@ -452,6 +729,221 @@ fun MainScreen(
     LaunchedEffect(Unit) {
         AppKeepAliveService.syncFromPrefs(context)
         ClipboardSyncService.syncFromPrefs(context)
+        NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+    }
+    DisposableEffect(context) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            val current = NeighborDiscoverySettingsStore.get(context)
+            neighborDiscoveryEnabled = current.enabled
+            localSendV2Enabled = current.localSendV2Enabled
+            NeighborDiscoveryBackgroundService.syncFromPrefs(context)
+        }
+        val prefs = NeighborDiscoverySettingsStore.registerChangeListener(context, listener)
+        onDispose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
+    DisposableEffect(lifecycleOwner, context) {
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_START -> {
+                    appInForeground = true
+                    NeighborDiscoveryBackgroundService.updateAppForeground(context, true)
+                    Log.i("NeighborRoute", "app foreground=true")
+                }
+                Lifecycle.Event.ON_STOP -> {
+                    appInForeground = false
+                    NeighborDiscoveryBackgroundService.updateAppForeground(context, false)
+                    Log.i("NeighborRoute", "app foreground=false")
+                }
+                else -> Unit
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        val started = lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        appInForeground = started
+        NeighborDiscoveryBackgroundService.updateAppForeground(context, started)
+        Log.i("NeighborRoute", "app foreground=$started (sync)")
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            appInForeground = false
+            NeighborDiscoveryBackgroundService.updateAppForeground(context, false)
+            Log.i("NeighborRoute", "app foreground=false (dispose)")
+        }
+    }
+    LaunchedEffect(foregroundLocalSendSheetState?.requestId) {
+        while (true) {
+            val current = foregroundLocalSendSheetState ?: break
+            if (!current.awaitingDecision || current.decisionDeadlineAtMs <= 0L) {
+                break
+            }
+            val remaining = ((current.decisionDeadlineAtMs - System.currentTimeMillis() + 999L) / 1000L)
+                .coerceAtLeast(0L)
+                .toInt()
+            if (remaining != current.countdownSeconds) {
+                foregroundLocalSendSheetState = current.copy(countdownSeconds = remaining)
+            }
+            delay(250L)
+        }
+    }
+    DisposableEffect(context, neighborDiscoveryEnabled, appInForeground) {
+        if (!neighborDiscoveryEnabled || !appInForeground) {
+            onDispose { }
+        } else {
+            val handler = Handler(Looper.getMainLooper())
+            val runtime = LanNeighborRuntime(
+                context.applicationContext,
+                onQuickSendInvite = { invite ->
+                    handler.post {
+                        pendingQuickSendInvite = invite
+                        pendingNavTarget = null
+                        pendingNavAtMs = 0L
+                        scope.launch { pagerState.scrollToPage(1) }
+                    }
+                },
+                onQuickSendCancel = { requestId ->
+                    handler.post {
+                        pendingQuickSendCancelId = requestId
+                        pendingNavTarget = null
+                        pendingNavAtMs = 0L
+                        scope.launch { pagerState.scrollToPage(1) }
+                    }
+                },
+                ownerTag = "activity"
+            )
+            runtime.start()
+            onDispose {
+                runtime.stop()
+            }
+        }
+    }
+    DisposableEffect(context, neighborDiscoveryEnabled, appInForeground, localSendV2Enabled) {
+        if (!neighborDiscoveryEnabled || !appInForeground || !localSendV2Enabled) {
+            onDispose { }
+        } else {
+            val mainHandler = Handler(Looper.getMainLooper())
+            val runtime = LocalSendRuntime(
+                context = context.applicationContext,
+                ownerTag = "activity",
+                onPeersChanged = {},
+                onReceiveEvent = { event ->
+                    mainHandler.post {
+                        updateForegroundLocalSendSheet(event)
+                    }
+                },
+                canAcceptIncoming = {
+                    !isForegroundLocalSendInteractionActive()
+                },
+                requestIncomingDecision = { request ->
+                    val settings = NeighborDiscoverySettingsStore.get(context)
+                    val defaultAccept = settings.defaultAction == NeighborDefaultAction.ACCEPT
+                    val timeoutSeconds = settings.timeoutSeconds.coerceIn(0, 25)
+                    if (timeoutSeconds <= 0) {
+                        if (defaultAccept) {
+                            return@LocalSendRuntime LocalSendIncomingDecision.ACCEPT
+                        }
+                        return@LocalSendRuntime LocalSendIncomingDecision.REJECT
+                    }
+
+                    val acceptedRef = AtomicBoolean(defaultAccept)
+                    val resolvedRef = AtomicBoolean(false)
+                    val latch = CountDownLatch(1)
+                    mainHandler.post {
+                        val hostActivity = context as? Activity
+                        val invalidHost = hostActivity == null ||
+                            hostActivity.isFinishing ||
+                            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1 && hostActivity.isDestroyed)
+                        if (invalidHost) {
+                            latch.countDown()
+                            return@post
+                        }
+
+                        foregroundLocalSendFileSizes.clear()
+                        foregroundLocalSendReceivedBytes.clear()
+                        foregroundLocalSendCompletedFiles.clear()
+
+                        fun resolveDecision(accept: Boolean) {
+                            if (!resolvedRef.compareAndSet(false, true)) {
+                                return
+                            }
+                            acceptedRef.set(accept)
+                            foregroundLocalSendResolveDecision = null
+                            if (accept) {
+                                foregroundLocalSendSheetState = foregroundLocalSendSheetState?.copy(
+                                    awaitingDecision = false,
+                                    accepted = true,
+                                    countdownSeconds = 0,
+                                    statusText = "已允许接收，等待发送端开始传输..."
+                                )
+                            } else {
+                                clearForegroundLocalSendSheet()
+                            }
+                            latch.countDown()
+                        }
+
+                        val decisionDeadlineAtMs = System.currentTimeMillis() + timeoutSeconds * 1000L
+                        foregroundLocalSendSheetState = ForegroundLocalSendReceiveSheetState(
+                            requestId = request.requestId,
+                            senderAlias = request.senderAlias.ifBlank { "LocalSend 设备" },
+                            senderIp = request.senderIp,
+                            firstFileName = request.firstFileName.ifBlank { "LocalSend 文件" },
+                            fileCount = request.fileCount.coerceAtLeast(1),
+                            totalSize = request.totalSize.coerceAtLeast(0L),
+                            defaultAccept = defaultAccept,
+                            timeoutSeconds = timeoutSeconds,
+                            decisionDeadlineAtMs = decisionDeadlineAtMs,
+                            countdownSeconds = timeoutSeconds,
+                            awaitingDecision = true,
+                            accepted = false,
+                            statusText = "等待你的决定"
+                        )
+                        foregroundLocalSendResolveDecision = { accept: Boolean ->
+                            resolveDecision(accept)
+                        }
+                        mainHandler.postDelayed(
+                            {
+                                resolveDecision(defaultAccept)
+                            },
+                            timeoutSeconds * 1000L
+                        )
+                    }
+                    latch.await((timeoutSeconds + 2).toLong(), TimeUnit.SECONDS)
+                    if (acceptedRef.get()) {
+                        LocalSendIncomingDecision.ACCEPT
+                    } else {
+                        LocalSendIncomingDecision.REJECT
+                    }
+                }
+            )
+            val startJob = scope.launch {
+                // Wait for background service runtime to release ports during foreground handoff.
+                delay(450)
+                val maxAttempts = 5
+                repeat(maxAttempts) { attempt ->
+                    runtime.start()
+                    if (runtime.isRunning()) {
+                        LocalSendRuntimeBridge.attach(runtime)
+                        Log.i("LocalSendRuntime", "[activity] started attempt=${attempt + 1}")
+                        return@launch
+                    }
+                    runtime.stop()
+                    if (attempt < maxAttempts - 1) {
+                        val backoffMs = 220L + attempt * 180L
+                        Log.w(
+                            "LocalSendRuntime",
+                            "[activity] start failed attempt=${attempt + 1}, retry in ${backoffMs}ms"
+                        )
+                        delay(backoffMs)
+                    }
+                }
+                Log.e("LocalSendRuntime", "[activity] failed to start after foreground handoff retries")
+            }
+            onDispose {
+                startJob.cancel()
+                LocalSendRuntimeBridge.detach(runtime)
+                runtime.stop()
+            }
+        }
     }
     LaunchedEffect(initialSharedText) {
         if (!initialSharedText.isNullOrBlank()) {
@@ -528,26 +1020,34 @@ fun MainScreen(
                 tabStateHolder.SaveableStateProvider("main_tab_$tab") {
                     when (tab) {
                         0 -> FileTransferScreen(
-                            initialFileUri = initialFileUri,
-                            initialSharedText = initialSharedText,
-                            onFileSelected = onFileSelected,
-                            onFilesSelected = onFilesSelected,
-                            onStopServer = onStopServer,
-                            allowedFileSendTypes = setOf(0, 2),
-                            onSecondaryPageVisibleChanged = { sendSecondaryOpen = it },
-                            onInitialFileConsumed = onInitialFileConsumed,
-                            onInitialTextConsumed = onInitialTextConsumed,
-                            onRequestOpenEnhancedReceive = { ipv6 ->
-                                pendingEnhancedReceiveMode = if (ipv6) 6 else 4
-                                pendingNavTarget = null
-                                pendingNavAtMs = 0L
-                                scope.launch { pagerState.scrollToPage(1) }
-                            }
+                            args = FileTransferScreenArgs(
+                                initialFileUri = initialFileUri,
+                                initialSharedText = initialSharedText,
+                                onFileSelected = onFileSelected,
+                                onFilesSelected = onFilesSelected,
+                                onStopServer = onStopServer,
+                                allowedFileSendFlags = FILE_SEND_FLAG_NORMAL or FILE_SEND_FLAG_SSTV,
+                                initialFileSendType = 0,
+                                onBack = null,
+                                onSecondaryPageVisibleChanged = { sendSecondaryOpen = it },
+                                onInitialFileConsumed = onInitialFileConsumed,
+                                onInitialTextConsumed = onInitialTextConsumed,
+                                onRequestOpenEnhancedReceive = { ipv6 ->
+                                    pendingEnhancedReceiveMode = if (ipv6) 6 else 4
+                                    pendingNavTarget = null
+                                    pendingNavAtMs = 0L
+                                    scope.launch { pagerState.scrollToPage(1) }
+                                }
+                            )
                         )
                         1 -> ReceiveFileScreen(
                             onSecondaryPageVisibleChanged = { receiveSecondaryOpen = it },
                             requestedEnhancedMode = pendingEnhancedReceiveMode,
-                            onEnhancedModeRequestHandled = { pendingEnhancedReceiveMode = 0 }
+                            onEnhancedModeRequestHandled = { pendingEnhancedReceiveMode = 0 },
+                            pendingQuickSendInvite = pendingQuickSendInvite,
+                            onQuickSendInviteHandled = { pendingQuickSendInvite = null },
+                            pendingQuickSendCancelId = pendingQuickSendCancelId,
+                            onQuickSendCancelHandled = { pendingQuickSendCancelId = null }
                         )
                         2 -> TransferLabScreen(
                             initialFileUri = initialFileUri,
@@ -558,6 +1058,169 @@ fun MainScreen(
                         )
                         3 -> DownloadHistoryScreen()
                         4 -> AboutScreen()
+                    }
+                }
+            }
+        }
+        foregroundLocalSendSheetState?.let { sheet ->
+            val completedCount = foregroundLocalSendCompletedFiles.values.count { it }
+            val receivedBytes = foregroundLocalSendReceivedBytes.values.sumOf { it }
+            val knownTotalBytes = foregroundLocalSendFileSizes.values.sumOf { it }
+            val totalBytes = maxOf(sheet.totalSize, knownTotalBytes)
+            val allCompleted = sheet.fileCount > 0 && completedCount >= sheet.fileCount
+            val canDismissSheet = !sheet.awaitingDecision &&
+                (sheet.failureMessage.isNotBlank() || sheet.cancelledBySender || sheet.messageReceived || allCompleted)
+            val startedTransfer = foregroundLocalSendFileSizes.isNotEmpty() ||
+                foregroundLocalSendReceivedBytes.isNotEmpty() ||
+                completedCount > 0
+            val progressFraction = when {
+                totalBytes > 0L -> (receivedBytes.toFloat() / totalBytes.toFloat()).coerceIn(0f, 1f)
+                sheet.fileCount > 0 -> (completedCount.toFloat() / sheet.fileCount.toFloat()).coerceIn(0f, 1f)
+                else -> 0f
+            }
+            val title = when {
+                sheet.awaitingDecision -> "LocalSend 接收请求"
+                sheet.messageReceived -> "LocalSend 文本已接收"
+                sheet.failureMessage.isNotBlank() || sheet.cancelledBySender -> "LocalSend 接收已中断"
+                allCompleted -> "LocalSend 接收完成"
+                else -> "LocalSend 接收中"
+            }
+            val summaryFileText = if (sheet.fileCount <= 1) {
+                sheet.firstFileName
+            } else {
+                "${sheet.firstFileName} 等 ${sheet.fileCount} 个文件"
+            }
+            val autoActionText = if (sheet.defaultAccept) "接收" else "拒绝"
+            val sheetState = rememberModalBottomSheetState(
+                skipPartiallyExpanded = true,
+                confirmValueChange = { value ->
+                    value != SheetValue.Hidden || canDismissSheet
+                }
+            )
+            ModalBottomSheet(
+                onDismissRequest = {
+                    if (canDismissSheet) {
+                        clearForegroundLocalSendSheet()
+                    }
+                },
+                sheetState = sheetState
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(20.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Text(
+                        title,
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Text(
+                        sheet.statusText,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                        )
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text("发送方：${sheet.senderAlias}", fontWeight = FontWeight.Medium)
+                            if (sheet.senderIp.isNotBlank()) {
+                                Text(
+                                    "地址：${sheet.senderIp}",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Text("文件：$summaryFileText")
+                            Text(
+                                "总大小：${if (sheet.totalSize > 0L) formatTransferBytes(sheet.totalSize) else "未知"}",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                    if (sheet.awaitingDecision) {
+                        Text(
+                            "${sheet.countdownSeconds} 秒后自动$autoActionText",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = {
+                                    foregroundLocalSendResolveDecision?.invoke(false)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("拒绝")
+                            }
+                            Button(
+                                onClick = {
+                                    foregroundLocalSendResolveDecision?.invoke(true)
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("允许接收")
+                            }
+                        }
+                    } else {
+                        if (sheet.accepted && !sheet.messageReceived) {
+                            if (sheet.failureMessage.isBlank() && !sheet.cancelledBySender && (startedTransfer || allCompleted)) {
+                                LinearProgressIndicator(
+                                    progress = { progressFraction },
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("${(progressFraction * 100).roundToInt()}%", fontSize = 14.sp)
+                                    Text("$completedCount/${sheet.fileCount} 个文件", fontSize = 14.sp)
+                                }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(formatTransferBytes(receivedBytes), fontSize = 12.sp)
+                                    Text(
+                                        if (totalBytes > 0L) formatTransferBytes(totalBytes) else "总大小未知",
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            } else if (sheet.failureMessage.isBlank() && !sheet.cancelledBySender) {
+                                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                            }
+                            if (sheet.lastFileName.isNotBlank()) {
+                                Text(
+                                    "当前文件：${sheet.lastFileName}",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                        if (sheet.failureMessage.isNotBlank()) {
+                            Text(sheet.failureMessage, color = MaterialTheme.colorScheme.error)
+                        } else if (sheet.cancelledBySender) {
+                            Text("发送方已取消本次传输。", color = MaterialTheme.colorScheme.error)
+                        }
+                        if (canDismissSheet) {
+                            Button(
+                                onClick = {
+                                    clearForegroundLocalSendSheet()
+                                },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text(if (allCompleted) "完成" else "关闭")
+                            }
+                        }
                     }
                 }
             }
@@ -1970,32 +2633,225 @@ private fun HighlightToggleButton(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FileTransferScreen(
-    initialFileUri: Uri?,
-    initialSharedText: String? = null,
-    onFileSelected: (Uri, String, String, Int) -> Unit,
-    onFilesSelected: (List<ShareFileSpec>) -> Unit = {},
-    onStopServer: () -> Unit,
-    allowedFileSendTypes: Set<Int> = setOf(0, 1, 2),
-    initialFileSendType: Int = 0,
-    onBack: (() -> Unit)? = null,
-    onSecondaryPageVisibleChanged: ((Boolean) -> Unit)? = null,
-    onInitialFileConsumed: () -> Unit = {},
-    onInitialTextConsumed: () -> Unit = {},
-    onRequestOpenEnhancedReceive: (Boolean) -> Unit = {}
+private fun ShareHeroBadge(
+    label: String,
+    modifier: Modifier = Modifier
 ) {
-    val cimbarMaxBytes = 20L * 1024L * 1024L
-    var selectedMode by remember { mutableIntStateOf(0) } // 0: file, 1: clipboard/text
-    val normalizedInitialType = remember(allowedFileSendTypes, initialFileSendType) {
-        if (allowedFileSendTypes.contains(initialFileSendType)) {
-            initialFileSendType
-        } else {
-            allowedFileSendTypes.firstOrNull() ?: 0
+    Box(
+        modifier = modifier
+            .background(
+                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+                shape = RoundedCornerShape(999.dp)
+            )
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f),
+                shape = RoundedCornerShape(999.dp)
+            )
+            .padding(horizontal = 12.dp, vertical = 7.dp)
+    ) {
+        Text(
+            text = label,
+            fontSize = 11.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+    }
+}
+
+@Composable
+private fun FileShareHeroCard(
+    onClick: () -> Unit
+) {
+    val shape = RoundedCornerShape(28.dp)
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent),
+        shape = shape
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(
+                    brush = Brush.linearGradient(
+                        colors = listOf(
+                            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.98f),
+                            MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.96f),
+                            MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.94f)
+                        )
+                    ),
+                    shape = shape
+                )
+                .border(
+                    width = 1.dp,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
+                    shape = shape
+                )
+                .padding(20.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+            ) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .size(132.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.18f),
+                            shape = RoundedCornerShape(999.dp)
+                        )
+                )
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .size(88.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.primary.copy(alpha = 0.10f),
+                            shape = RoundedCornerShape(999.dp)
+                        )
+                )
+            }
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                ShareHeroBadge("二维码主分享入口")
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(
+                        modifier = Modifier.weight(1f),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "把文件直接变成二维码",
+                            fontSize = 26.sp,
+                            lineHeight = 31.sp,
+                            fontWeight = FontWeight.Black,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "支持文件、照片、视频和 APK。入口更集中，选完内容后直接进入分享。",
+                            fontSize = 13.sp,
+                            lineHeight = 19.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(92.dp)
+                            .background(
+                                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f),
+                                shape = RoundedCornerShape(26.dp)
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f),
+                                shape = RoundedCornerShape(26.dp)
+                            )
+                            .padding(10.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.QrCode,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(38.dp)
+                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomEnd)
+                                .size(32.dp)
+                                .background(
+                                    color = MaterialTheme.colorScheme.primary,
+                                    shape = RoundedCornerShape(14.dp)
+                                ),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "↑",
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.Black,
+                                color = MaterialTheme.colorScheme.onPrimary
+                            )
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    ShareHeroBadge("文件")
+                    ShareHeroBadge("照片 / 视频")
+                    ShareHeroBadge("应用 APK")
+                }
+                Button(
+                    onClick = onClick,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(58.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.onSurface,
+                        contentColor = MaterialTheme.colorScheme.surface
+                    ),
+                    shape = RoundedCornerShape(18.dp)
+                ) {
+                    Text("选择文件并生成二维码", fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                }
+            }
         }
     }
-    var fileSendType by remember(allowedFileSendTypes, normalizedInitialType) {
+}
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun FileTransferScreen(
+    args: FileTransferScreenArgs
+) {
+    val initialFileUri = args.initialFileUri
+    val initialSharedText = args.initialSharedText
+    val onFileSelected = args.onFileSelected
+    val onFilesSelected = args.onFilesSelected
+    val onStopServer = args.onStopServer
+    val allowedFileSendFlags = args.allowedFileSendFlags
+    val initialFileSendType = args.initialFileSendType
+    val onBack = args.onBack
+    val onSecondaryPageVisibleChanged = args.onSecondaryPageVisibleChanged
+    val onInitialFileConsumed = args.onInitialFileConsumed
+    val onInitialTextConsumed = args.onInitialTextConsumed
+    val onRequestOpenEnhancedReceive = args.onRequestOpenEnhancedReceive
+    fun supportsSendType(type: Int): Boolean {
+        val bit = when (type) {
+            0 -> FILE_SEND_FLAG_NORMAL
+            1 -> FILE_SEND_FLAG_CIMBAR
+            2 -> FILE_SEND_FLAG_SSTV
+            else -> 0
+        }
+        return bit != 0 && (allowedFileSendFlags and bit) != 0
+    }
+
+    fun firstSupportedSendType(): Int {
+        return when {
+            supportsSendType(0) -> 0
+            supportsSendType(1) -> 1
+            supportsSendType(2) -> 2
+            else -> 0
+        }
+    }
+
+    val cimbarMaxBytes = 20L * 1024L * 1024L
+    var selectedMode by remember { mutableIntStateOf(0) } // 0: file, 1: enhanced, 2: clipboard/text
+    val normalizedInitialType = if (supportsSendType(initialFileSendType)) {
+        initialFileSendType
+    } else {
+        firstSupportedSendType()
+    }
+    var fileSendType by remember(allowedFileSendFlags, normalizedInitialType) {
         mutableIntStateOf(normalizedInitialType)
     } // 0: normal, 1: cimbar, 2: sstv
     var selectedFileUri by remember { mutableStateOf<Uri?>(null) }
@@ -2032,6 +2888,7 @@ fun FileTransferScreen(
     val cimbarFrameDispatcher = remember { Executors.newSingleThreadExecutor().asCoroutineDispatcher() }
     val context = LocalContext.current
     val localView = LocalView.current
+    var localSendV2Enabled by remember { mutableStateOf(NeighborDiscoverySettingsStore.get(context).localSendV2Enabled) }
     val hotspotPreferences = remember { HotspotPreferences(context) }
     var hotspotConfig by remember { mutableStateOf<HotspotConfig?>(null) }
     var hotspotEnabled by remember { mutableStateOf(false) }
@@ -2039,7 +2896,15 @@ fun FileTransferScreen(
     var showHotspotPermissionDialog by remember { mutableStateOf(false) }
     var hotspotPermissionMessage by remember { mutableStateOf("热点权限不足，请先授权后再开启。") }
     var networkShareMode by remember { mutableIntStateOf(0) } // 0: IPv4 局域网, 1: IPv6 公网
-    var manualPortInput by remember { mutableStateOf("12333") }
+    var shareRandomPortEnabled by remember {
+        mutableStateOf(NeighborDiscoverySettingsStore.get(context).shareRandomPort)
+    }
+    var configuredFixedSharePort by remember {
+        mutableIntStateOf(NeighborDiscoverySettingsStore.get(context).shareFixedPort)
+    }
+    var manualPortInput by remember {
+        mutableStateOf(NeighborDiscoverySettingsStore.get(context).shareFixedPort.toString())
+    }
     var enableNatAssist by remember { mutableStateOf(false) }
     var showMainShareStunProbing by remember { mutableStateOf(false) }
     var mainShareStunProbeChecked by remember { mutableIntStateOf(0) }
@@ -2080,10 +2945,38 @@ fun FileTransferScreen(
     var showIpv4UdpEnhancedSend by rememberSaveable { mutableStateOf(false) }
     var showIpv6UdpEnhancedSend by rememberSaveable { mutableStateOf(false) }
     var showClipboardSyncPage by remember { mutableStateOf(false) }
+    var showClipboardActionSheet by remember { mutableStateOf(false) }
+    var showTextActionSheet by remember { mutableStateOf(false) }
+    val neighborPeers = remember { mutableStateListOf<LanNeighborPeer>() }
+    val cachedFileTranPeers = remember { mutableStateListOf<LanNeighborPeer>() }
+    val cachedLocalSendPeers = remember { mutableStateListOf<LanNeighborPeer>() }
+    var neighborScanRunning by remember { mutableStateOf(false) }
+    var neighborScanJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    var manualNeighborIp by remember { mutableStateOf("") }
+    var showManualNeighborIpDialog by remember { mutableStateOf(false) }
+    val neighborHistory = remember { mutableStateListOf<NeighborHistoryEntry>() }
+    var neighborInfiniteScan by remember { mutableStateOf(true) }
+    var showQuickInviteProgressDialog by remember { mutableStateOf(false) }
+    var quickInviteProgress by remember { mutableStateOf(0f) }
+    var quickInviteProgressText by remember { mutableStateOf("准备发送请求...") }
+    var quickInviteSendCancelled by remember { mutableStateOf(false) }
+    var quickInviteForceCancelAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    var quickInvitePendingTargetIp by remember { mutableStateOf("") }
+    var quickInvitePendingRequestId by remember { mutableStateOf("") }
+    var quickInvitePendingReverseTask by remember { mutableStateOf<QuickInviteReverseTask?>(null) }
+    var quickInviteRejectDialogMessage by remember { mutableStateOf<String?>(null) }
+    var quickInviteBusyDialogMessage by remember { mutableStateOf<String?>(null) }
+    var quickInviteTimeoutDialogMessage by remember { mutableStateOf<String?>(null) }
+    var localSendDraftItems by remember { mutableStateOf<List<LocalSendDraftItem>>(emptyList()) }
+    var localSendDraftEphemeral by remember { mutableStateOf(false) }
+    var showLocalSendTargetSheet by remember { mutableStateOf(false) }
+    var localSendTargetSheetTitle by remember { mutableStateOf("选择 LocalSend 设备") }
     val isSecondaryPageVisible =
         showIpv4UdpEnhancedSend ||
             showIpv6UdpEnhancedSend ||
             showClipboardSyncPage ||
+            showClipboardActionSheet ||
+            showTextActionSheet ||
             showQrDetailPage ||
             showMainShareStunProbing ||
             showMainShareStunPicker ||
@@ -2094,6 +2987,11 @@ fun FileTransferScreen(
             showReversePushConfigSheet ||
             showReversePushScanner ||
             showReversePendingSheet ||
+            showLocalSendTargetSheet ||
+            showManualNeighborIpDialog ||
+            showQuickInviteProgressDialog ||
+            quickInviteRejectDialogMessage != null ||
+            quickInviteTimeoutDialogMessage != null ||
             showExternalShareChoiceDialog ||
             showReverseSendProgressSheet ||
             showInstalledApkPicker ||
@@ -2102,6 +3000,23 @@ fun FileTransferScreen(
             showCopyUrlConfirmDialog ||
             showCimbarFullscreen ||
             showCimbarHelpDialog
+    DisposableEffect(context) {
+        val listener = SharedPreferences.OnSharedPreferenceChangeListener { _, _ ->
+            val settings = NeighborDiscoverySettingsStore.get(context)
+            localSendV2Enabled = settings.localSendV2Enabled
+            shareRandomPortEnabled = settings.shareRandomPort
+            configuredFixedSharePort = settings.shareFixedPort
+            if (!settings.shareRandomPort) {
+                manualPortInput = settings.shareFixedPort.toString()
+            } else if (manualPortInput.toIntOrNull() !in 1024..65535) {
+                manualPortInput = settings.shareFixedPort.toString()
+            }
+        }
+        val prefs = NeighborDiscoverySettingsStore.registerChangeListener(context, listener)
+        onDispose {
+            prefs.unregisterOnSharedPreferenceChangeListener(listener)
+        }
+    }
     LaunchedEffect(isSecondaryPageVisible) {
         onSecondaryPageVisibleChanged?.invoke(isSecondaryPageVisible)
     }
@@ -2110,7 +3025,19 @@ fun FileTransferScreen(
             onSecondaryPageVisibleChanged?.invoke(false)
         }
     }
-
+    LaunchedEffect(shareRandomPortEnabled, configuredFixedSharePort) {
+        val displayPort = if (shareRandomPortEnabled) {
+            runCatching {
+                ServerSocket(0).use { socket ->
+                    socket.reuseAddress = true
+                    socket.localPort
+                }
+            }.getOrNull()?.takeIf { it in 1024..65535 } ?: configuredFixedSharePort
+        } else {
+            configuredFixedSharePort.coerceIn(1024, 65535)
+        }
+        manualPortInput = displayPort.toString()
+    }
     if (showIpv4UdpEnhancedSend) {
         Ipv4UdpEnhancedSendScreen(
             onBack = { showIpv4UdpEnhancedSend = false },
@@ -2138,6 +3065,44 @@ fun FileTransferScreen(
     if (showClipboardSyncPage) {
         ClipboardSyncPage(onBack = { showClipboardSyncPage = false })
         return
+    }
+
+    fun clearLocalSendDraftSelection(clearPersistent: Boolean) {
+        if (clearPersistent || localSendDraftEphemeral) {
+            localSendDraftItems = emptyList()
+            localSendDraftEphemeral = false
+        }
+        showLocalSendTargetSheet = false
+        localSendTargetSheetTitle = "选择 LocalSend 设备"
+    }
+
+    fun nextRandomSharePort(): Int {
+        val preferredFallback = configuredFixedSharePort.coerceIn(1024, 65535)
+        return runCatching {
+            ServerSocket(0).use { socket ->
+                socket.reuseAddress = true
+                socket.localPort
+            }
+        }.getOrNull()
+            ?.takeIf { it in 1024..65535 }
+            ?: preferredFallback
+    }
+
+    fun resolveSharePort(forceRefreshRandom: Boolean = false): Int {
+        return if (shareRandomPortEnabled) {
+            val existing = manualPortInput.toIntOrNull()
+            val port = if (forceRefreshRandom || existing !in 1024..65535) {
+                nextRandomSharePort()
+            } else {
+                existing ?: nextRandomSharePort()
+            }
+            manualPortInput = port.toString()
+            port
+        } else {
+            configuredFixedSharePort.coerceIn(1024, 65535).also {
+                manualPortInput = it.toString()
+            }
+        }
     }
 
     fun clearShareState() {
@@ -2168,6 +3133,8 @@ fun FileTransferScreen(
         pendingMainShareRequest = null
         selectedMainShareStun = null
         showClipboardSyncPage = false
+        showClipboardActionSheet = false
+        showTextActionSheet = false
         showClipboardFileShareConfig = false
         pendingClipboardFileUri = null
         pendingClipboardFileName = null
@@ -2177,6 +3144,659 @@ fun FileTransferScreen(
         showInstalledApkPicker = false
         pendingIpv4EnhancedIncomingUris = emptyList()
         pendingIpv6EnhancedIncomingUris = emptyList()
+        clearLocalSendDraftSelection(clearPersistent = true)
+        quickInvitePendingReverseTask = null
+        neighborPeers.clear()
+        cachedFileTranPeers.clear()
+        cachedLocalSendPeers.clear()
+        neighborInfiniteScan = true
+        neighborScanJob?.cancel()
+    }
+
+    fun buildInlineLocalSendDraft(text: String, prefix: String): List<LocalSendDraftItem> {
+        val trimmed = text.trim()
+        if (trimmed.isBlank()) return emptyList()
+        val bytes = trimmed.toByteArray(Charsets.UTF_8)
+        return listOf(
+            LocalSendDraftItem(
+                fileName = "${prefix}_${System.currentTimeMillis()}.txt",
+                mimeType = "text/plain",
+                size = bytes.size.toLong(),
+                inlineBytes = bytes,
+                previewText = trimmed
+            )
+        )
+    }
+
+    fun describeClipboardContent(): Pair<String, String> {
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        val clipData = clipboard?.primaryClip
+        if (clipData == null || clipData.itemCount <= 0) {
+            return "剪贴板为空" to ""
+        }
+        val item = clipData.getItemAt(0)
+        val directText = item.text?.toString().orEmpty().trim()
+        if (directText.isNotBlank()) {
+            return "剪贴板文本" to directText.take(1200)
+        }
+        val uri = item.uri
+        if (uri != null) {
+            val fileName = getFileName(context, uri).ifBlank { uri.lastPathSegment ?: "clipboard_item" }
+            val mimeType = getMimeType(context, uri).ifBlank { "未知类型" }
+            return "剪贴板文件" to "$fileName · $mimeType"
+        }
+        val fallback = item.coerceToText(context)?.toString().orEmpty().trim()
+        if (fallback.isNotBlank()) {
+            return "剪贴板内容" to fallback.take(1200)
+        }
+        return "暂不支持的剪贴板内容" to ""
+    }
+
+    suspend fun buildClipboardLocalSendDrafts(): List<LocalSendDraftItem> {
+        val clipboard = context.getSystemService(ClipboardManager::class.java)
+        val clipData = clipboard?.primaryClip ?: return emptyList()
+        if (clipData.itemCount <= 0) return emptyList()
+        val item = clipData.getItemAt(0)
+        val directText = item.text?.toString().orEmpty().trim()
+        if (directText.isNotBlank()) {
+            return buildInlineLocalSendDraft(directText, "clipboard")
+        }
+
+        val uri = item.uri
+        if (uri != null) {
+            val fileName = getFileName(context, uri).ifBlank { "clipboard_${System.currentTimeMillis()}" }
+            val mimeType = getMimeType(context, uri).ifBlank {
+                URLConnection.guessContentTypeFromName(fileName) ?: "application/octet-stream"
+            }
+            return listOf(
+                LocalSendDraftItem(
+                    uri = uri,
+                    fileName = fileName,
+                    mimeType = mimeType,
+                    size = getFileSize(context, uri).coerceAtLeast(0L)
+                )
+            )
+        }
+
+        val fallback = item.coerceToText(context)?.toString().orEmpty().trim()
+        return if (fallback.isNotBlank()) {
+            buildInlineLocalSendDraft(fallback, "clipboard")
+        } else {
+            emptyList()
+        }
+    }
+
+    suspend fun collectLocalSendFolderDrafts(treeUri: Uri): List<LocalSendDraftItem> = withContext(Dispatchers.IO) {
+        val root = DocumentFile.fromTreeUri(context, treeUri) ?: return@withContext emptyList()
+        val rootName = root.name?.trim().orEmpty().ifBlank { "folder_${System.currentTimeMillis()}" }
+        val drafts = mutableListOf<LocalSendDraftItem>()
+
+        fun walk(parent: DocumentFile, prefix: String) {
+            parent.listFiles().forEach { child ->
+                val childName = child.name?.trim().orEmpty().ifBlank { "file_${drafts.size + 1}" }
+                val relativePath = "$prefix/$childName".replace('\\', '/')
+                when {
+                    child.isDirectory -> walk(child, relativePath)
+                    child.isFile -> {
+                        val mimeType = child.type.orEmpty().ifBlank {
+                            URLConnection.guessContentTypeFromName(childName) ?: "application/octet-stream"
+                        }
+                        drafts += LocalSendDraftItem(
+                            uri = child.uri,
+                            fileName = relativePath,
+                            mimeType = mimeType,
+                            size = child.length().coerceAtLeast(0L)
+                        )
+                    }
+                }
+            }
+        }
+
+        walk(root, rootName)
+        drafts
+    }
+
+    suspend fun promptLocalSendTargetSelection(
+        drafts: List<LocalSendDraftItem>,
+        title: String,
+        ephemeral: Boolean
+    ) {
+        if (drafts.isEmpty()) {
+            errorMessage = "当前没有可发送到 LocalSend 的内容。"
+            return
+        }
+        localSendDraftItems = drafts
+        localSendDraftEphemeral = ephemeral
+        localSendTargetSheetTitle = title
+        errorMessage = null
+        showLocalSendTargetSheet = true
+    }
+
+    fun refreshNeighborHistory() {
+        neighborHistory.clear()
+        neighborHistory.addAll(NeighborHistoryStore.load(context))
+    }
+
+    fun mergeNeighborPeerSources(
+        fileTranPeers: List<LanNeighborPeer>,
+        localSendPeers: List<LanNeighborPeer>
+    ): List<LanNeighborPeer> {
+        val mergedByIp = LinkedHashMap<String, LanNeighborPeer>()
+        localSendPeers.forEach { peer ->
+            mergedByIp[peer.ip.lowercase()] = peer.copy(peerProtocol = NeighborPeerProtocol.LOCALSEND)
+        }
+        // FileTran takes precedence over LocalSend for the same IP.
+        fileTranPeers.forEach { peer ->
+            mergedByIp[peer.ip.lowercase()] = peer.copy(peerProtocol = NeighborPeerProtocol.FILETRAN)
+        }
+        return mergedByIp.values.sortedWith(compareBy<LanNeighborPeer> { it.name.lowercase() }.thenBy { it.ip })
+    }
+
+    fun applyMergedNeighborPeers() {
+        val merged = mergeNeighborPeerSources(
+            fileTranPeers = cachedFileTranPeers,
+            localSendPeers = cachedLocalSendPeers
+        )
+        neighborPeers.clear()
+        neighborPeers.addAll(merged)
+    }
+
+    suspend fun scanNeighbors(targetIp: String? = null) {
+        neighborScanRunning = true
+        try {
+            val target = targetIp?.trim()?.takeIf { it.isNotBlank() }
+            // Probe FileTran first, then probe LocalSend.
+            val fileTranPeers = withContext(Dispatchers.IO) {
+                discoverLanNeighbors(context, targetIp = target, timeoutMs = 1400)
+            }
+            val localSendPeers = if (!localSendV2Enabled) {
+                emptyList()
+            } else if (target == null) {
+                LocalSendRuntimeBridge.announceNow()
+                delay(320)
+                LocalSendRuntimeBridge.snapshotPeers()
+            } else {
+                withContext(Dispatchers.IO) {
+                    listOfNotNull(LocalSendRuntimeBridge.probePeer(target))
+                }
+            }
+
+            if (target == null) {
+                cachedFileTranPeers.clear()
+                cachedFileTranPeers.addAll(fileTranPeers)
+                cachedLocalSendPeers.clear()
+                cachedLocalSendPeers.addAll(localSendPeers)
+            } else {
+                cachedFileTranPeers.removeAll { it.ip.equals(target, ignoreCase = true) }
+                cachedLocalSendPeers.removeAll { it.ip.equals(target, ignoreCase = true) }
+                cachedFileTranPeers.addAll(fileTranPeers.filter { it.ip.equals(target, ignoreCase = true) })
+                cachedLocalSendPeers.addAll(localSendPeers.filter { it.ip.equals(target, ignoreCase = true) })
+            }
+            applyMergedNeighborPeers()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (_: Throwable) {
+        } finally {
+            neighborScanRunning = false
+        }
+    }
+
+    fun requestScanNeighbors(targetIp: String? = null) {
+        neighborScanJob?.cancel()
+        neighborScanJob = scope.launch {
+            scanNeighbors(targetIp)
+        }
+    }
+
+    fun ipv4Prefix(ip: String): String? {
+        val parts = ip.trim().split('.')
+        if (parts.size != 4) return null
+        if (parts.any { it.toIntOrNull() !in 0..255 }) return null
+        return "${parts[0]}.${parts[1]}.${parts[2]}"
+    }
+
+    fun shouldPreferReverseForTarget(senderIp: String, targetIp: String): Boolean {
+        val senderPrefix = ipv4Prefix(senderIp)
+        val targetPrefix = ipv4Prefix(targetIp)
+        if (senderPrefix == null || targetPrefix == null) return false
+        return senderPrefix != targetPrefix
+    }
+
+    fun buildQuickInviteReverseFiles(): List<Triple<Uri, String, String>> {
+        if (currentBatchShareUris.isNotEmpty()) {
+            return currentBatchShareUris.mapIndexed { index, uri ->
+                val name = getFileName(context, uri).ifBlank { "file_${index + 1}" }
+                val mime = getMimeType(context, uri).ifBlank {
+                    URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+                }
+                Triple(uri, name, mime)
+            }
+        }
+        val uri = selectedFileUri ?: return emptyList()
+        val name = selectedFileName?.ifBlank { getFileName(context, uri) } ?: getFileName(context, uri)
+        val mime = selectedFileMimeType?.ifBlank {
+            getMimeType(context, uri).ifBlank {
+                URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+            }
+        } ?: getMimeType(context, uri).ifBlank {
+            URLConnection.guessContentTypeFromName(name) ?: "application/octet-stream"
+        }
+        return listOf(Triple(uri, name, mime))
+    }
+
+    fun buildLocalSendFilesFromDrafts(drafts: List<LocalSendDraftItem>): List<LocalSendSendFile> {
+        if (drafts.isEmpty()) return emptyList()
+        val now = System.currentTimeMillis()
+        return drafts.mapIndexed { index, draft ->
+            val inlineSize = draft.inlineBytes?.size?.toLong()
+            LocalSendSendFile(
+                id = "file_${index + 1}_${now}",
+                uri = draft.uri,
+                fileName = draft.fileName.ifBlank { "file_${index + 1}" },
+                mimeType = draft.mimeType.ifBlank { "application/octet-stream" },
+                size = (inlineSize ?: draft.size).coerceAtLeast(0L),
+                inlineBytes = draft.inlineBytes,
+                previewText = draft.previewText
+            )
+        }
+    }
+
+    fun buildLocalSendFilesForCurrentSelection(): List<LocalSendSendFile> {
+        if (selectedMode == 2) {
+            val textDrafts = when {
+                localSendDraftEphemeral && localSendDraftItems.isNotEmpty() -> localSendDraftItems
+                customText.trim().isNotBlank() -> buildInlineLocalSendDraft(customText, "message")
+                else -> emptyList()
+            }
+            return buildLocalSendFilesFromDrafts(textDrafts)
+        }
+
+        val reverseFiles = buildQuickInviteReverseFiles()
+        if (reverseFiles.isNotEmpty()) {
+            val now = System.currentTimeMillis()
+            return reverseFiles.mapIndexed { index, (uri, fileName, mimeType) ->
+                LocalSendSendFile(
+                    id = "file_${index + 1}_${now}",
+                    uri = uri,
+                    fileName = fileName.ifBlank { "file_${index + 1}" },
+                    mimeType = mimeType.ifBlank { "application/octet-stream" },
+                    size = getFileSize(context, uri).coerceAtLeast(0L)
+                )
+            }
+        }
+        return buildLocalSendFilesFromDrafts(localSendDraftItems)
+    }
+
+    suspend fun requestLocalSendPinFromUser(peer: LanNeighborPeer, invalidPin: Boolean): String? {
+        return withContext(Dispatchers.Main) {
+            val hostActivity = context as? Activity ?: return@withContext null
+            suspendCancellableCoroutine { cont ->
+                val input = EditText(hostActivity).apply {
+                    hint = "请输入 6 位 PIN"
+                    inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_VARIATION_PASSWORD
+                    setText(LocalSendProtocol.getSavedPin(context, peer).orEmpty())
+                    setSelection(text.length)
+                }
+                val message = if (invalidPin) {
+                    "PIN 错误，请重新输入。"
+                } else {
+                    "该 LocalSend 设备开启了 PIN 验证，请输入后重试。"
+                }
+                val dialog = android.app.AlertDialog.Builder(hostActivity)
+                    .setTitle("输入 LocalSend PIN")
+                    .setMessage(message)
+                    .setView(input)
+                    .setCancelable(false)
+                    .setNegativeButton("取消") { d, _ ->
+                        if (cont.isActive) cont.resume(null)
+                        d.dismiss()
+                    }
+                    .setPositiveButton("确定") { d, _ ->
+                        if (cont.isActive) cont.resume(input.text?.toString()?.trim())
+                        d.dismiss()
+                    }
+                    .setOnCancelListener {
+                        if (cont.isActive) cont.resume(null)
+                    }
+                    .create()
+                dialog.show()
+                cont.invokeOnCancellation {
+                    runCatching { dialog.dismiss() }
+                }
+            }
+        }
+    }
+
+    suspend fun sendByLocalSendPeer(peer: LanNeighborPeer) {
+        showLocalSendTargetSheet = false
+        val files = buildLocalSendFilesForCurrentSelection()
+        if (files.isEmpty()) {
+            errorMessage = "LocalSend 发送需要先选择文件、文件夹或文本。"
+            return
+        }
+        val clearEphemeralAfterSend = localSendDraftEphemeral
+        quickInvitePendingTargetIp = peer.ip
+        quickInvitePendingRequestId = "localsend_${System.currentTimeMillis()}"
+        quickInviteSendCancelled = false
+        showQuickInviteProgressDialog = true
+        quickInviteProgress = 0f
+        quickInviteProgressText = "正在连接 LocalSend 设备..."
+        val progressHandler = Handler(Looper.getMainLooper())
+        val sendControl = LocalSendSendControl()
+        quickInviteForceCancelAction = {
+            quickInviteSendCancelled = true
+            quickInviteProgressText = "正在强制中断 LocalSend 发送..."
+            showQuickInviteProgressDialog = false
+            statusMessage = "正在强制中断 LocalSend 发送..."
+            errorMessage = null
+            sendControl.cancel(force = true)
+        }
+
+        var currentPin = LocalSendProtocol.getSavedPin(context, peer)
+        var pinFirstAttempt = true
+        try {
+            while (true) {
+                val result = withContext(Dispatchers.IO) {
+                    LocalSendProtocol.sendFilesToPeer(
+                        context = context,
+                        peer = peer,
+                        files = files,
+                        pin = currentPin,
+                        control = sendControl,
+                        isCancelled = { quickInviteSendCancelled }
+                    ) { progress ->
+                        progressHandler.post {
+                            quickInviteProgress = progress.progress
+                            quickInviteProgressText = progress.message
+                        }
+                    }
+                }
+
+                if (quickInviteSendCancelled) {
+                    showQuickInviteProgressDialog = false
+                    quickInvitePendingTargetIp = ""
+                    quickInvitePendingRequestId = ""
+                    statusMessage = "已强制中断 LocalSend 发送。"
+                    errorMessage = null
+                    return
+                }
+
+                if (result.isSuccess) {
+                    showQuickInviteProgressDialog = false
+                    quickInvitePendingTargetIp = ""
+                    quickInvitePendingRequestId = ""
+                    LocalSendProtocol.savePin(context, peer, currentPin)
+                    statusMessage = "LocalSend 发送完成。"
+                    errorMessage = null
+                    NeighborHistoryStore.upsert(
+                        context,
+                        NeighborHistoryEntry(
+                            ip = peer.ip,
+                            name = peer.name,
+                            hostName = peer.hostName,
+                            lastUsedAt = System.currentTimeMillis()
+                        )
+                    )
+                    refreshNeighborHistory()
+                    return
+                }
+
+                val errorText = result.exceptionOrNull()?.message.orEmpty()
+                if (errorText == "AUTH_REQUIRED" || errorText.contains("prepare_upload_failed:401")) {
+                    showQuickInviteProgressDialog = false
+                    val pin = requestLocalSendPinFromUser(peer, invalidPin = !pinFirstAttempt)
+                    pinFirstAttempt = false
+                    if (pin.isNullOrBlank()) {
+                        LocalSendProtocol.savePin(context, peer, null)
+                        quickInvitePendingTargetIp = ""
+                        quickInvitePendingRequestId = ""
+                        errorMessage = "LocalSend 发送已取消（未输入 PIN）。"
+                        return
+                    }
+                    currentPin = pin.trim()
+                    showQuickInviteProgressDialog = true
+                    quickInviteProgress = 0f
+                    quickInviteProgressText = "PIN 已输入，正在重试..."
+                    continue
+                }
+
+                showQuickInviteProgressDialog = false
+                quickInvitePendingTargetIp = ""
+                quickInvitePendingRequestId = ""
+                when (errorText) {
+                    "RECEIVER_BUSY" -> {
+                        quickInviteBusyDialogMessage = "对方设备正忙，正在处理另一个接收请求，请稍后再试。"
+                        errorMessage = null
+                    }
+                    "RECEIVER_DISABLED" -> {
+                        errorMessage = "对方设备当前未开启 LocalSend 接收。"
+                    }
+                    "REJECTED" -> {
+                        quickInviteRejectDialogMessage = "对方拒绝了本次 LocalSend 接收请求。"
+                        errorMessage = null
+                    }
+                    else -> {
+                        errorMessage = "LocalSend 发送失败: ${result.exceptionOrNull()?.message ?: "unknown"}"
+                    }
+                }
+                return
+            }
+        } finally {
+            quickInviteForceCancelAction = null
+            if (clearEphemeralAfterSend) {
+                clearLocalSendDraftSelection(clearPersistent = true)
+            }
+        }
+    }
+
+    suspend fun sendClipboardToLocalSendPeer(peer: LanNeighborPeer) {
+        val drafts = buildClipboardLocalSendDrafts()
+        if (drafts.isEmpty()) {
+            errorMessage = "当前没有可发送的剪贴板内容。"
+            return
+        }
+        localSendDraftItems = drafts
+        localSendDraftEphemeral = true
+        showClipboardActionSheet = false
+        sendByLocalSendPeer(peer)
+    }
+
+    suspend fun sendTextToLocalSendPeer(peer: LanNeighborPeer) {
+        val drafts = buildInlineLocalSendDraft(customText, "message")
+        if (drafts.isEmpty()) {
+            errorMessage = "文本内容为空。"
+            return
+        }
+        localSendDraftItems = drafts
+        localSendDraftEphemeral = true
+        showTextActionSheet = false
+        sendByLocalSendPeer(peer)
+    }
+
+    suspend fun sendQuickInviteToIp(targetIp: String, forceReverse: Boolean = false) {
+        quickInviteForceCancelAction = null
+        val senderTimeoutMs = 30_000
+        val trimmedIp = targetIp.trim()
+        if (trimmedIp.isBlank()) {
+            errorMessage = "请输入有效 IPv4 地址。"
+            return
+        }
+        val url = serverUrl?.trim().orEmpty()
+        if (url.isBlank()) {
+            errorMessage = "当前没有可发送内容，请先生成二维码分享地址。"
+            return
+        }
+        val fileName = selectedFileName?.ifBlank { "FileTran 分享" } ?: "FileTran 分享"
+        val fileSize = selectedFileUri?.let { getFileSize(context, it) } ?: -1L
+        val senderIp = resolvePreferredIpv4ForTarget(
+            targetIp = trimmedIp,
+            fallback = NetworkUtils.getLocalIpAddress(context).orEmpty()
+        )
+        val autoPreferReverse = shouldPreferReverseForTarget(senderIp = senderIp, targetIp = trimmedIp)
+        val preferredTransferMode = when {
+            forceReverse -> QUICK_TRANSFER_MODE_REVERSE_PUSH
+            autoPreferReverse -> QUICK_TRANSFER_MODE_REVERSE_PUSH
+            else -> QUICK_TRANSFER_MODE_AUTO
+        }
+        val reverseFilesSnapshot = if (preferredTransferMode == QUICK_TRANSFER_MODE_REVERSE_PUSH) {
+            buildQuickInviteReverseFiles()
+        } else {
+            emptyList()
+        }
+        if (preferredTransferMode == QUICK_TRANSFER_MODE_REVERSE_PUSH && reverseFilesSnapshot.isEmpty()) {
+            errorMessage = "当前没有可反向传输的文件，请先选择文件后再发送。"
+            return
+        }
+        val invite = QuickSendInvite(
+            senderName = buildLocalNeighborName(context),
+            senderHostName = buildLocalHostName(),
+            senderIp = senderIp,
+            fileName = fileName,
+            fileSize = fileSize,
+            downloadUrl = url,
+            preferredTransferMode = preferredTransferMode
+        )
+        Log.i(
+            "QuickInviteTx",
+            "sendQuickInvite requestId=${invite.requestId} targetIp=$trimmedIp senderIp=${invite.senderIp} preferred=$preferredTransferMode url=${invite.downloadUrl}"
+        )
+        quickInvitePendingTargetIp = trimmedIp
+        quickInvitePendingRequestId = invite.requestId
+        showQuickInviteProgressDialog = true
+        quickInviteProgress = 0f
+        quickInviteProgressText = if (preferredTransferMode == QUICK_TRANSFER_MODE_REVERSE_PUSH) {
+            "正在发送请求（反向传输）..."
+        } else {
+            "正在发送请求..."
+        }
+        quickInviteSendCancelled = false
+        val waitingStartedAt = System.currentTimeMillis()
+        val progressTicker = scope.launch {
+            while (showQuickInviteProgressDialog && !quickInviteSendCancelled) {
+                val elapsedMs = (System.currentTimeMillis() - waitingStartedAt).coerceAtLeast(0L)
+                val elapsedSec = (elapsedMs / 1000L).toInt()
+                quickInviteProgress = (elapsedMs.toFloat() / senderTimeoutMs.toFloat()).coerceIn(0f, 0.98f)
+                quickInviteProgressText = if (preferredTransferMode == QUICK_TRANSFER_MODE_REVERSE_PUSH) {
+                    "等待对方确认（反向传输，${elapsedSec}s/30s）"
+                } else {
+                    "等待对方确认（${elapsedSec}s/30s）"
+                }
+                delay(200)
+            }
+        }
+        val response = withContext(Dispatchers.IO) {
+            sendQuickSendInviteAndAwaitResponse(
+                targetIp = trimmedIp,
+                invite = invite,
+                timeoutMs = senderTimeoutMs,
+                isCancelled = { quickInviteSendCancelled }
+            )
+        }
+        progressTicker.cancel()
+        if (quickInviteSendCancelled) {
+            showQuickInviteProgressDialog = false
+            withContext(Dispatchers.IO) {
+                sendQuickSendInviteCancel(
+                    targetIp = quickInvitePendingTargetIp,
+                    requestId = quickInvitePendingRequestId
+                )
+            }
+            statusMessage = "已中断发送请求，可继续选择邻居发送。"
+            errorMessage = null
+            quickInvitePendingTargetIp = ""
+            quickInvitePendingRequestId = ""
+            quickInvitePendingReverseTask = null
+            return
+        }
+        quickInviteProgress = 1f
+        showQuickInviteProgressDialog = false
+        if (response != null) {
+            Log.i(
+                "QuickInviteTx",
+                "invite response requestId=${invite.requestId} accepted=${response.accepted} mode=${response.transferMode} endpoint=${response.reverseEndpoint}"
+            )
+            NeighborHistoryStore.upsert(
+                context,
+                NeighborHistoryEntry(
+                    ip = trimmedIp,
+                    name = neighborPeers.firstOrNull { it.ip == trimmedIp }?.name ?: "FileTran 邻居",
+                    hostName = neighborPeers.firstOrNull { it.ip == trimmedIp }?.hostName.orEmpty(),
+                    lastUsedAt = System.currentTimeMillis()
+                )
+            )
+            refreshNeighborHistory()
+            if (response.accepted) {
+                if (response.transferMode.equals(QUICK_TRANSFER_MODE_REVERSE_PUSH, ignoreCase = true)) {
+                    val reverseEndpoint = response.reverseEndpoint.trim()
+                    if (reverseEndpoint.isBlank()) {
+                        Log.w("QuickInviteTx", "reverse accepted but endpoint empty requestId=${invite.requestId}")
+                        quickInviteRejectDialogMessage = "对方已接受，但未返回有效反向地址。"
+                    } else if (reverseFilesSnapshot.isEmpty()) {
+                        Log.w("QuickInviteTx", "reverse accepted but no file snapshot requestId=${invite.requestId}")
+                        quickInviteRejectDialogMessage = "当前没有可发送文件，请重新选择后再试。"
+                    } else {
+                        statusMessage = "对方已接受请求，正在切换为反向传输..."
+                        errorMessage = null
+                        quickInvitePendingTargetIp = ""
+                        quickInvitePendingRequestId = ""
+                        Log.i("QuickInviteTx", "switch to reverse endpoint=$reverseEndpoint requestId=${invite.requestId}")
+                        quickInvitePendingReverseTask = QuickInviteReverseTask(
+                            requestId = invite.requestId,
+                            endpoint = reverseEndpoint,
+                            files = reverseFilesSnapshot
+                        )
+                        return
+                    }
+                } else {
+                    statusMessage = "对方已接收请求，正在下载。"
+                    errorMessage = null
+                }
+            } else {
+                quickInviteRejectDialogMessage = response.message.ifBlank { "对方已拒绝接收。" }
+            }
+            quickInvitePendingTargetIp = ""
+            quickInvitePendingRequestId = ""
+        } else {
+            Log.w("QuickInviteTx", "invite timeout requestId=${invite.requestId} target=$trimmedIp")
+            quickInviteTimeoutDialogMessage = "等待对方确认超时（30s）。你可以重试，或让对方检查邻居发现设置。"
+            quickInvitePendingTargetIp = ""
+            quickInvitePendingRequestId = ""
+            quickInvitePendingReverseTask = null
+        }
+    }
+
+    suspend fun sendQuickInviteSmart(targetIp: String, forceReverse: Boolean = false) {
+        val ip = targetIp.trim()
+        if (ip.isBlank()) {
+            errorMessage = "请输入有效 IPv4 地址。"
+            return
+        }
+        val fileTranPeer = withContext(Dispatchers.IO) {
+            discoverLanNeighbors(context, targetIp = ip, timeoutMs = 900)
+                .firstOrNull { it.ip.equals(ip, ignoreCase = true) }
+        }
+        if (fileTranPeer != null) {
+            sendQuickInviteToIp(ip, forceReverse = forceReverse)
+            return
+        }
+        if (localSendV2Enabled) {
+            val localSendPeer = withContext(Dispatchers.IO) {
+                LocalSendRuntimeBridge.probePeer(ip)
+            }
+            if (localSendPeer != null) {
+                sendByLocalSendPeer(localSendPeer)
+                return
+            }
+        }
+        sendQuickInviteToIp(ip, forceReverse = forceReverse)
+    }
+
+    suspend fun sendToNeighbor(peer: LanNeighborPeer, forceReverse: Boolean = false) {
+        if (peer.peerProtocol == NeighborPeerProtocol.LOCALSEND) {
+            sendByLocalSendPeer(peer)
+        } else {
+            sendQuickInviteToIp(peer.ip, forceReverse = forceReverse)
+        }
     }
 
     fun resetCimbarSender() {
@@ -2637,6 +4257,9 @@ fun FileTransferScreen(
                             onProgress(sentBytes, size)
                         }
                     } ?: throw IllegalStateException("无法读取待发送文件")
+                    if (sentBytes != size) {
+                        throw IllegalStateException("文件大小不一致，声明=$size，实际发送=$sentBytes")
+                    }
                     out.flush()
                     onProgress(size, size)
                     if (isCancelled()) throw IllegalStateException(REVERSE_PUSH_CANCELLED)
@@ -2798,6 +4421,44 @@ fun FileTransferScreen(
         pushFilesToReverseTarget(reversePendingFiles)
     }
 
+    LaunchedEffect(quickInvitePendingReverseTask?.requestId) {
+        val task = quickInvitePendingReverseTask ?: return@LaunchedEffect
+        val endpoint = task.endpoint.trim()
+        if (endpoint.isBlank()) return@LaunchedEffect
+        val normalized = normalizeReversePushAddress(endpoint)
+        if (normalized.isNullOrBlank()) {
+            errorMessage = "接收端返回的反向地址无效。"
+            Log.w("QuickInviteTx", "reverse task endpoint invalid requestId=${task.requestId} endpoint=$endpoint")
+            if (quickInvitePendingReverseTask?.requestId == task.requestId) {
+                quickInvitePendingReverseTask = null
+            }
+            return@LaunchedEffect
+        }
+        val files = task.files
+        if (files.isEmpty()) {
+            errorMessage = "当前没有可发送的文件，无法执行反向传输。"
+            Log.w("QuickInviteTx", "reverse task file list empty requestId=${task.requestId}")
+            if (quickInvitePendingReverseTask?.requestId == task.requestId) {
+                quickInvitePendingReverseTask = null
+            }
+            return@LaunchedEffect
+        }
+        Log.i("QuickInviteTx", "start reverse task requestId=${task.requestId} endpoint=$normalized files=${files.size}")
+        val previousEnabled = reversePushEnabled
+        val previousAddress = reversePushAddress
+        reversePushEnabled = true
+        reversePushAddress = normalized
+        try {
+            pushFilesToReverseTarget(files)
+        } finally {
+            reversePushEnabled = previousEnabled
+            reversePushAddress = previousAddress
+            if (quickInvitePendingReverseTask?.requestId == task.requestId) {
+                quickInvitePendingReverseTask = null
+            }
+        }
+    }
+
     suspend fun shareAsFileLink(
         uri: Uri,
         fileName: String,
@@ -2806,12 +4467,12 @@ fun FileTransferScreen(
         selectedStun: StunMappedEndpoint? = null,
         preProbed: ShareEndpointProbeResult? = null
     ) {
-        if (reversePushEnabled) {
+        clearLocalSendDraftSelection(clearPersistent = true)
+        if (reversePushEnabled && selectedMode == 1) {
             pushFilesToReverseTarget(listOf(Triple(uri, fileName, mimeType)))
             return
         }
-        val localPort = manualPortInput.toIntOrNull()?.takeIf { it in 1024..65535 } ?: 12333
-        manualPortInput = localPort.toString()
+        val localPort = resolveSharePort(forceRefreshRandom = true)
         val probe = preProbed ?: probeShareEndpoint(localPort)
         if (probe == null) {
             errorMessage = if (networkShareMode == 1) {
@@ -2895,6 +4556,7 @@ fun FileTransferScreen(
         selectedStun: StunMappedEndpoint? = null,
         preProbed: ShareEndpointProbeResult? = null
     ) {
+        clearLocalSendDraftSelection(clearPersistent = true)
         if (uris.isEmpty()) {
             errorMessage = "未选择文件。"
             return
@@ -2903,7 +4565,7 @@ fun FileTransferScreen(
             errorMessage = "多地址二维码最多支持 $MAX_BATCH_QR_FILES 个文件，文件较多请使用 ZIP 分享。"
             return
         }
-        if (reversePushEnabled) {
+        if (reversePushEnabled && selectedMode == 1) {
             val files = uris.map { uri ->
                 val fileName = getFileName(context, uri)
                 val mimeType = getMimeType(context, uri).ifBlank {
@@ -2914,8 +4576,7 @@ fun FileTransferScreen(
             pushFilesToReverseTarget(files)
             return
         }
-        val localPort = manualPortInput.toIntOrNull()?.takeIf { it in 1024..65000 } ?: 12333
-        manualPortInput = localPort.toString()
+        val localPort = resolveSharePort(forceRefreshRandom = true)
         val probe = preProbed ?: probeShareEndpoint(localPort)
         if (probe == null) {
             errorMessage = if (networkShareMode == 1) {
@@ -3099,6 +4760,9 @@ fun FileTransferScreen(
         val fileName = getFileName(context, uri)
         val mimeType = getMimeType(context, uri)
         val fileSize = getFileSize(context, uri)
+        if (fileSendType == 0) {
+            clearLocalSendDraftSelection(clearPersistent = true)
+        }
         if (fileSendType == 1) {
             if (fileSize <= 0L) {
                 errorMessage = "无法读取文件大小，CIMBAR 模式仅支持小于 20MB 的文件。"
@@ -3181,7 +4845,7 @@ fun FileTransferScreen(
             errorMessage = null
             return
         }
-        if (reversePushEnabled) {
+        if (reversePushEnabled && selectedMode == 1) {
             selectedFileUri = uri
             selectedFileName = fileName
             selectedFileMimeType = mimeType
@@ -3204,7 +4868,8 @@ fun FileTransferScreen(
             errorMessage = "当前模式不支持多选，请切换到“文件二维码”模式。"
             return
         }
-        if (reversePushEnabled) {
+        clearLocalSendDraftSelection(clearPersistent = true)
+        if (reversePushEnabled && selectedMode == 1) {
             reversePendingFiles = unique.map { uri ->
                 val fileName = getFileName(context, uri)
                 val mimeType = getMimeType(context, uri).ifBlank {
@@ -3236,7 +4901,7 @@ fun FileTransferScreen(
             return
         }
 
-        if (reversePushEnabled) {
+        if (reversePushEnabled && selectedMode == 1) {
             val textFileUri = createTempTextUri(context, text)
             if (textFileUri == null) {
                 errorMessage = "文本转文件失败。"
@@ -3281,13 +4946,14 @@ fun FileTransferScreen(
             errorMessage = "文本转文件失败。"
             return
         }
-        val tempName = "clipboard_${System.currentTimeMillis()}.txt"
-        pendingClipboardFileUri = textFileUri
-        pendingClipboardFileName = tempName
-        pendingClipboardMimeType = "text/plain"
-        showClipboardFileShareConfig = true
+        val tempName = "${sourceLabel}_${System.currentTimeMillis()}.txt"
+        shareAsFileLink(
+            uri = textFileUri,
+            fileName = tempName,
+            mimeType = "text/plain"
+        )
         isCustomTextQrShare = false
-        statusMessage = "文本过长，已转为文件分享，请在下一页选择网络并生成二维码。"
+        statusMessage = "文本过长，已转为文件分享。"
     }
 
     suspend fun shareClipboardContent() {
@@ -3432,7 +5098,7 @@ fun FileTransferScreen(
     LaunchedEffect(initialSharedText) {
         val incomingText = initialSharedText?.trim().orEmpty()
         if (incomingText.isNotEmpty()) {
-            selectedMode = 1
+            selectedMode = 2
             customText = incomingText
             showQrDetailPage = false
             showClipboardFileShareConfig = false
@@ -3550,7 +5216,7 @@ fun FileTransferScreen(
                     errorMessage = "提取应用 APK 失败。"
                     return@launch
                 }
-                if (reversePushEnabled) {
+                if (reversePushEnabled && selectedMode == 1) {
                     val append = shares.map { Triple(it.uri, it.fileName, it.mimeType) }
                     reversePendingFiles = reversePendingFiles + append
                     selectedFileUri = null
@@ -3577,9 +5243,8 @@ fun FileTransferScreen(
     ) { uri: Uri? ->
         uri?.let {
             scope.launch {
-                selectedMode = 0
                 handlePickedFile(it)
-                if (reversePushEnabled) {
+                if (reversePushEnabled && selectedMode == 1) {
                     showReversePendingSheet = true
                 }
             }
@@ -3591,12 +5256,56 @@ fun FileTransferScreen(
     ) { uris: List<Uri> ->
         if (uris.isNotEmpty()) {
             scope.launch {
-                selectedMode = 0
                 handlePickedFiles(uris)
-                if (reversePushEnabled) {
+                if (reversePushEnabled && selectedMode == 1) {
                     showReversePendingSheet = true
                 }
             }
+        }
+    }
+
+    val localSendFolderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            selectedMode = 0
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    treeUri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }
+            val drafts = collectLocalSendFolderDrafts(treeUri)
+            if (drafts.isEmpty()) {
+                errorMessage = "所选文件夹为空或暂时无法访问。"
+                return@launch
+            }
+            val rootName = DocumentFile.fromTreeUri(context, treeUri)
+                ?.name
+                ?.trim()
+                .orEmpty()
+                .ifBlank { "文件夹" }
+            onStopServer()
+            resetCimbarSender()
+            resetSstvState()
+            localSendDraftItems = drafts
+            localSendDraftEphemeral = false
+            showLocalSendTargetSheet = false
+            localSendTargetSheetTitle = "选择 LocalSend 设备"
+            selectedFileUri = null
+            selectedFileName = "文件夹：$rootName（${drafts.size} 项，仅 LocalSend）"
+            selectedFileMimeType = "application/octet-stream"
+            currentBatchShareUris = emptyList()
+            serverUrl = null
+            qrCodeBitmap = null
+            showQrDetailPage = false
+            isCustomTextQrShare = false
+            pendingClipboardFileUri = null
+            pendingClipboardFileName = null
+            pendingClipboardMimeType = null
+            statusMessage = "已选择文件夹“$rootName”，仅支持通过 LocalSend 发送并保留目录结构。"
+            errorMessage = null
         }
     }
 
@@ -3633,9 +5342,9 @@ fun FileTransferScreen(
             resetSstvState()
         }
     }
-    LaunchedEffect(allowedFileSendTypes) {
-        if (!allowedFileSendTypes.contains(fileSendType)) {
-            fileSendType = allowedFileSendTypes.firstOrNull() ?: 0
+    LaunchedEffect(allowedFileSendFlags) {
+        if (!supportsSendType(fileSendType)) {
+            fileSendType = firstSupportedSendType()
             resetCimbarSender()
             resetSstvState()
             clearShareState()
@@ -3712,20 +5421,705 @@ fun FileTransferScreen(
                 ) {
                     Text("多选文件/照片/视频")
                 }
-                OutlinedButton(
-                    onClick = {
-                        showFilePickOptionSheet = false
-                        showInstalledApkPicker = true
-                    },
-                    modifier = Modifier.fillMaxWidth()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Text("提取已安装应用 APK（可多选）")
+                    OutlinedButton(
+                        onClick = {
+                            showFilePickOptionSheet = false
+                            scope.launch { shareSelfApkByQr() }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("分享本APP")
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            showFilePickOptionSheet = false
+                            showInstalledApkPicker = true
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("分享其他APP")
+                    }
                 }
                 TextButton(
                     onClick = { showFilePickOptionSheet = false },
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("取消")
+                }
+            }
+        }
+    }
+
+    if (showLocalSendTargetSheet) {
+        val localSendTargetPeers = neighborPeers
+            .filter { it.peerProtocol == NeighborPeerProtocol.LOCALSEND }
+            .distinctBy { "${it.ip}:${it.localSendPort}:${it.localSendProtocol}" }
+            .sortedWith(compareBy<LanNeighborPeer> { it.name.lowercase() }.thenBy { it.ip })
+        val localSendTargetSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val localSendTargetPagerState = rememberPagerState(initialPage = 1) { 2 }
+        val localSendItemCount = localSendDraftItems.size.coerceAtLeast(1)
+        val localSendTotalBytes = localSendDraftItems.sumOf { draft ->
+            (draft.inlineBytes?.size?.toLong() ?: draft.size).coerceAtLeast(0L)
+        }
+        val localSendFirstDraft = localSendDraftItems.firstOrNull()
+        val localSendSummaryLabel = when {
+            localSendDraftItems.isEmpty() -> "当前没有可发送内容"
+            localSendDraftItems.any { it.inlineBytes != null } -> {
+                if (localSendFirstDraft?.fileName?.startsWith("clipboard_", ignoreCase = true) == true) {
+                    "剪贴板消息"
+                } else {
+                    "文本消息"
+                }
+            }
+            localSendDraftItems.any { it.fileName.contains('/') } -> "文件夹内容"
+            localSendFirstDraft?.fileName?.startsWith("clipboard_", ignoreCase = true) == true -> "剪贴板文件"
+            localSendItemCount > 1 -> "多文件"
+            else -> "文件"
+        }
+        LaunchedEffect(showLocalSendTargetSheet, localSendTargetPagerState.currentPage) {
+            if (!showLocalSendTargetSheet || localSendTargetPagerState.currentPage != 1) return@LaunchedEffect
+            refreshNeighborHistory()
+            if (!neighborInfiniteScan) {
+                neighborInfiniteScan = true
+            }
+            requestScanNeighbors()
+        }
+        LaunchedEffect(showLocalSendTargetSheet, neighborInfiniteScan, localSendTargetPagerState.currentPage) {
+            if (!showLocalSendTargetSheet) return@LaunchedEffect
+            if (!neighborInfiniteScan || localSendTargetPagerState.currentPage != 1) return@LaunchedEffect
+            while (showLocalSendTargetSheet && neighborInfiniteScan && localSendTargetPagerState.currentPage == 1) {
+                scanNeighbors()
+                delay(1200)
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = {
+                if (localSendDraftEphemeral) {
+                    clearLocalSendDraftSelection(clearPersistent = true)
+                } else {
+                    clearLocalSendDraftSelection(clearPersistent = false)
+                }
+            },
+            sheetState = localSendTargetSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.88f)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(localSendTargetSheetTitle, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                HorizontalPager(
+                    state = localSendTargetPagerState,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                ) { page ->
+                    if (page == 0) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Text(
+                                "当前内容会按 LocalSend 协议发送。文本与剪贴板会在兼容终端中直接按消息处理。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.45f)
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier.padding(14.dp),
+                                    verticalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(localSendSummaryLabel, fontWeight = FontWeight.SemiBold)
+                                    Text("项目数：$localSendItemCount", fontSize = 12.sp)
+                                    Text("总大小：${formatSize(localSendTotalBytes)}", fontSize = 12.sp)
+                                    localSendFirstDraft?.let { draft ->
+                                        Text(
+                                            "首项：${draft.fileName}",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        draft.previewText?.takeIf { it.isNotBlank() }?.let { preview ->
+                                            Text(
+                                                preview.take(180),
+                                                fontSize = 12.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            Button(
+                                onClick = {
+                                    scope.launch { localSendTargetPagerState.animateScrollToPage(1) }
+                                },
+                                enabled = localSendDraftItems.isNotEmpty(),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Text("进入邻居列表")
+                            }
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Text(
+                                "这里复用邻居发现流程。进入 LocalSend 入口后默认停在这一页，可直接刷新并选择设备。",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp
+                            )
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        if (neighborInfiniteScan) {
+                                            neighborInfiniteScan = false
+                                            neighborScanJob?.cancel()
+                                        } else {
+                                            neighborInfiniteScan = true
+                                            requestScanNeighbors()
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(46.dp)
+                                ) {
+                                    Text(if (neighborInfiniteScan) "停止刷新" else "开始刷新")
+                                }
+                                OutlinedButton(
+                                    onClick = { showManualNeighborIpDialog = true },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(46.dp)
+                                ) {
+                                    Text("手动输入IP")
+                                }
+                            }
+                            if (neighborInfiniteScan) {
+                                Text(
+                                    "无限探测中",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            if (manualNeighborIp.isNotBlank()) {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "手动目标：$manualNeighborIp",
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        OutlinedButton(
+                                            onClick = { requestScanNeighbors(targetIp = manualNeighborIp) }
+                                        ) { Text("探测") }
+                                        Button(
+                                            onClick = {
+                                                scope.launch {
+                                                    val targetIp = manualNeighborIp.trim()
+                                                    val peer = localSendTargetPeers.firstOrNull {
+                                                        it.ip.equals(targetIp, ignoreCase = true)
+                                                    } ?: withContext(Dispatchers.IO) {
+                                                        LocalSendRuntimeBridge.probePeer(targetIp)
+                                                    }
+                                                    if (peer == null) {
+                                                        errorMessage = "该地址上未发现 LocalSend 设备。"
+                                                        return@launch
+                                                    }
+                                                    cachedLocalSendPeers.removeAll {
+                                                        it.ip.equals(peer.ip, ignoreCase = true)
+                                                    }
+                                                    cachedLocalSendPeers.add(peer)
+                                                    applyMergedNeighborPeers()
+                                                    sendByLocalSendPeer(peer)
+                                                }
+                                            },
+                                            enabled = manualNeighborIp.isNotBlank() && localSendDraftItems.isNotEmpty()
+                                        ) { Text("发送") }
+                                    }
+                                }
+                            }
+                            Text("在线 LocalSend 设备（${localSendTargetPeers.size}）", fontWeight = FontWeight.SemiBold)
+                            if (localSendTargetPeers.isEmpty()) {
+                                Text(
+                                    "暂未发现 LocalSend 邻居。可以继续等待广播，也可以手动输入 IP 探测。",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            localSendTargetPeers.forEach { peer ->
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(
+                                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                    )
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(peer.name.ifBlank { peer.ip }, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            "${peer.ip}:${peer.localSendPort}",
+                                            fontSize = 12.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Button(
+                                            onClick = {
+                                                scope.launch { sendByLocalSendPeer(peer) }
+                                            },
+                                            modifier = Modifier.fillMaxWidth(),
+                                            enabled = localSendDraftItems.isNotEmpty()
+                                        ) {
+                                            Text("发送到这台 LocalSend 设备")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    repeat(2) { index ->
+                        Box(
+                            modifier = Modifier
+                                .padding(horizontal = 6.dp, vertical = 4.dp)
+                                .size(if (localSendTargetPagerState.currentPage == index) 10.dp else 8.dp)
+                                .background(
+                                    if (localSendTargetPagerState.currentPage == index) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                    },
+                                    shape = RoundedCornerShape(50)
+                                )
+                                .clickable {
+                                    scope.launch { localSendTargetPagerState.animateScrollToPage(index) }
+                                }
+                        )
+                    }
+                }
+                TextButton(
+                    onClick = {
+                        if (localSendDraftEphemeral) {
+                            clearLocalSendDraftSelection(clearPersistent = true)
+                        } else {
+                            clearLocalSendDraftSelection(clearPersistent = false)
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("取消")
+                }
+            }
+        }
+    }
+
+    if (showClipboardActionSheet) {
+        val (clipboardLabel, clipboardPreview) = describeClipboardContent()
+        val clipboardReady = clipboardLabel != "剪贴板为空" && clipboardLabel != "暂不支持的剪贴板内容"
+        val clipboardActionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val clipboardLocalSendPeers = neighborPeers
+            .filter { it.peerProtocol == NeighborPeerProtocol.LOCALSEND }
+            .distinctBy { "${it.ip}:${it.localSendPort}:${it.localSendProtocol}" }
+            .sortedWith(compareBy<LanNeighborPeer> { it.name.lowercase() }.thenBy { it.ip })
+        LaunchedEffect(showClipboardActionSheet) {
+            if (!showClipboardActionSheet) return@LaunchedEffect
+            refreshNeighborHistory()
+            if (!neighborInfiniteScan) {
+                neighborInfiniteScan = true
+            }
+            requestScanNeighbors()
+        }
+        LaunchedEffect(showClipboardActionSheet, neighborInfiniteScan) {
+            if (!showClipboardActionSheet) return@LaunchedEffect
+            if (!neighborInfiniteScan) return@LaunchedEffect
+            while (showClipboardActionSheet && neighborInfiniteScan) {
+                scanNeighbors()
+                delay(1200)
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { showClipboardActionSheet = false },
+            sheetState = clipboardActionSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.82f)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("发送到 LocalSend", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    value = if (clipboardReady) clipboardPreview else "",
+                    onValueChange = {},
+                    readOnly = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 120.dp, max = 220.dp),
+                    minLines = 4,
+                    maxLines = 8,
+                    label = { Text(clipboardLabel) },
+                    placeholder = {
+                        Text(
+                            if (clipboardLabel == "剪贴板为空") {
+                                "当前没有可发送的剪贴板内容"
+                            } else {
+                                "当前剪贴板类型暂不支持"
+                            }
+                        )
+                    }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            if (neighborInfiniteScan) {
+                                neighborInfiniteScan = false
+                                neighborScanJob?.cancel()
+                            } else {
+                                neighborInfiniteScan = true
+                                requestScanNeighbors()
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text(if (neighborInfiniteScan) "停止刷新" else "开始刷新")
+                    }
+                    OutlinedButton(
+                        onClick = { showManualNeighborIpDialog = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("手动输入IP")
+                    }
+                }
+                if (neighborInfiniteScan) {
+                    Text(
+                        "无限探测中",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp
+                    )
+                }
+                if (manualNeighborIp.isNotBlank()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "手动目标：$manualNeighborIp",
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(
+                                onClick = { requestScanNeighbors(targetIp = manualNeighborIp) }
+                            ) { Text("探测") }
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        val targetIp = manualNeighborIp.trim()
+                                        val peer = clipboardLocalSendPeers.firstOrNull {
+                                            it.ip.equals(targetIp, ignoreCase = true)
+                                        } ?: withContext(Dispatchers.IO) {
+                                            LocalSendRuntimeBridge.probePeer(targetIp)
+                                        }
+                                        if (peer == null) {
+                                            errorMessage = "该地址上未发现 LocalSend 设备。"
+                                            return@launch
+                                        }
+                                        cachedLocalSendPeers.removeAll {
+                                            it.ip.equals(peer.ip, ignoreCase = true)
+                                        }
+                                        cachedLocalSendPeers.add(peer)
+                                        applyMergedNeighborPeers()
+                                        sendClipboardToLocalSendPeer(peer)
+                                    }
+                                },
+                                enabled = clipboardReady && manualNeighborIp.isNotBlank()
+                            ) { Text("发送") }
+                        }
+                    }
+                }
+                Text("在线 LocalSend 设备（${clipboardLocalSendPeers.size}）", fontWeight = FontWeight.SemiBold)
+                if (clipboardLocalSendPeers.isEmpty()) {
+                    Text(
+                        "暂无在线 LocalSend 设备。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    clipboardLocalSendPeers.forEach { peer ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(peer.name.ifBlank { peer.ip }, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${peer.ip}:${peer.localSendPort}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Button(
+                                    onClick = {
+                                        scope.launch { sendClipboardToLocalSendPeer(peer) }
+                                    },
+                                    enabled = clipboardReady,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("发送到这台设备")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (showTextActionSheet) {
+        val trimmedText = customText.trim()
+        val textReady = trimmedText.isNotBlank()
+        val textActionSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+        val textLocalSendPeers = neighborPeers
+            .filter { it.peerProtocol == NeighborPeerProtocol.LOCALSEND }
+            .distinctBy { "${it.ip}:${it.localSendPort}:${it.localSendProtocol}" }
+            .sortedWith(compareBy<LanNeighborPeer> { it.name.lowercase() }.thenBy { it.ip })
+        LaunchedEffect(showTextActionSheet) {
+            if (!showTextActionSheet) return@LaunchedEffect
+            refreshNeighborHistory()
+            if (!neighborInfiniteScan) {
+                neighborInfiniteScan = true
+            }
+            requestScanNeighbors()
+        }
+        LaunchedEffect(showTextActionSheet, neighborInfiniteScan) {
+            if (!showTextActionSheet) return@LaunchedEffect
+            if (!neighborInfiniteScan) return@LaunchedEffect
+            while (showTextActionSheet && neighborInfiniteScan) {
+                scanNeighbors()
+                delay(1200)
+            }
+        }
+        ModalBottomSheet(
+            onDismissRequest = { showTextActionSheet = false },
+            sheetState = textActionSheetState
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .fillMaxHeight(0.82f)
+                    .padding(20.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text("发送到 LocalSend", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                OutlinedTextField(
+                    value = trimmedText,
+                    onValueChange = {},
+                    readOnly = true,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 140.dp, max = 240.dp),
+                    minLines = 5,
+                    maxLines = 10,
+                    label = { Text("文本内容") },
+                    placeholder = { Text("请先输入要发送的文本") }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = {
+                            if (neighborInfiniteScan) {
+                                neighborInfiniteScan = false
+                                neighborScanJob?.cancel()
+                            } else {
+                                neighborInfiniteScan = true
+                                requestScanNeighbors()
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text(if (neighborInfiniteScan) "停止刷新" else "开始刷新")
+                    }
+                    OutlinedButton(
+                        onClick = { showManualNeighborIpDialog = true },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(46.dp)
+                    ) {
+                        Text("手动输入IP")
+                    }
+                }
+                if (neighborInfiniteScan) {
+                    Text(
+                        "无限探测中",
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                        fontSize = 12.sp
+                    )
+                }
+                if (manualNeighborIp.isNotBlank()) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "手动目标：$manualNeighborIp",
+                                fontSize = 12.sp,
+                                modifier = Modifier.weight(1f)
+                            )
+                            OutlinedButton(
+                                onClick = { requestScanNeighbors(targetIp = manualNeighborIp) }
+                            ) { Text("探测") }
+                            Button(
+                                onClick = {
+                                    scope.launch {
+                                        val targetIp = manualNeighborIp.trim()
+                                        val peer = textLocalSendPeers.firstOrNull {
+                                            it.ip.equals(targetIp, ignoreCase = true)
+                                        } ?: withContext(Dispatchers.IO) {
+                                            LocalSendRuntimeBridge.probePeer(targetIp)
+                                        }
+                                        if (peer == null) {
+                                            errorMessage = "该地址上未发现 LocalSend 设备。"
+                                            return@launch
+                                        }
+                                        cachedLocalSendPeers.removeAll {
+                                            it.ip.equals(peer.ip, ignoreCase = true)
+                                        }
+                                        cachedLocalSendPeers.add(peer)
+                                        applyMergedNeighborPeers()
+                                        sendTextToLocalSendPeer(peer)
+                                    }
+                                },
+                                enabled = textReady && manualNeighborIp.isNotBlank()
+                            ) { Text("发送") }
+                        }
+                    }
+                }
+                Text("在线 LocalSend 设备（${textLocalSendPeers.size}）", fontWeight = FontWeight.SemiBold)
+                if (textLocalSendPeers.isEmpty()) {
+                    Text(
+                        "暂无在线 LocalSend 设备。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    textLocalSendPeers.forEach { peer ->
+                        Card(
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = CardDefaults.cardColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(peer.name.ifBlank { peer.ip }, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "${peer.ip}:${peer.localSendPort}",
+                                    fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Button(
+                                    onClick = {
+                                        scope.launch { sendTextToLocalSendPeer(peer) }
+                                    },
+                                    enabled = textReady,
+                                    modifier = Modifier.fillMaxWidth()
+                                ) {
+                                    Text("发送到这台设备")
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -3932,13 +6326,10 @@ fun FileTransferScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
-                OutlinedTextField(
-                    value = manualPortInput,
-                    onValueChange = { manualPortInput = it.filter { ch -> ch.isDigit() } },
-                    label = { Text("端口") },
-                    placeholder = { Text("默认 12333，可修改") },
-                    modifier = Modifier.fillMaxWidth(),
-                    singleLine = true
+                Text(
+                    "当前端口：$manualPortInput · ${if (shareRandomPortEnabled) "随机" else "固定"}",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -4308,6 +6699,10 @@ fun FileTransferScreen(
         }
     }
 
+    LaunchedEffect(Unit) {
+        refreshNeighborHistory()
+    }
+
     if (showQrDetailPage && qrCodeBitmap != null) {
         val qrSheetState = rememberModalBottomSheetState(
             skipPartiallyExpanded = true,
@@ -4323,154 +6718,533 @@ fun FileTransferScreen(
             },
             sheetState = qrSheetState
         ) {
+            val neighborPageEnabled = selectedMode == 0 &&
+                fileSendType == 0 &&
+                networkShareMode == 0 &&
+                !reversePushEnabled &&
+                !isCustomTextQrShare
+            val pageCount = if (neighborPageEnabled) 2 else 1
+            val initialPage = remember(neighborPageEnabled) {
+                if (neighborPageEnabled) {
+                    NeighborDiscoverySettingsStore.get(context).qrDefaultPage.coerceIn(0, 1)
+                } else {
+                    0
+                }
+            }
+            val qrDetailPagerState = rememberPagerState(initialPage = initialPage) { pageCount }
+            val neighborSettings = NeighborDiscoverySettingsStore.get(context)
+            LaunchedEffect(neighborPageEnabled, qrDetailPagerState.currentPage) {
+                if (!neighborPageEnabled) {
+                    if (qrDetailPagerState.currentPage != 0) {
+                        qrDetailPagerState.scrollToPage(0)
+                    }
+                    return@LaunchedEffect
+                }
+                NeighborDiscoverySettingsStore.setQrDefaultPage(context, qrDetailPagerState.currentPage)
+                if (qrDetailPagerState.currentPage == 1) {
+                    refreshNeighborHistory()
+                    if (!neighborInfiniteScan) {
+                        neighborInfiniteScan = true
+                    }
+                    requestScanNeighbors()
+                }
+            }
+            LaunchedEffect(neighborInfiniteScan, qrDetailPagerState.currentPage, neighborPageEnabled) {
+                if (!neighborPageEnabled) return@LaunchedEffect
+                if (!neighborInfiniteScan || qrDetailPagerState.currentPage != 1) return@LaunchedEffect
+                while (neighborInfiniteScan && qrDetailPagerState.currentPage == 1) {
+                    scanNeighbors()
+                    delay(1200)
+                }
+            }
+            LaunchedEffect(neighborPageEnabled, qrDetailPagerState.currentPage, localSendV2Enabled) {
+                if (!neighborPageEnabled || qrDetailPagerState.currentPage != 1) return@LaunchedEffect
+                if (!localSendV2Enabled) {
+                    cachedLocalSendPeers.clear()
+                    applyMergedNeighborPeers()
+                    return@LaunchedEffect
+                }
+                var tick = 0
+                while (isActive && neighborPageEnabled && qrDetailPagerState.currentPage == 1) {
+                    if (tick % 4 == 0) {
+                        LocalSendRuntimeBridge.announceNow()
+                    }
+                    cachedLocalSendPeers.clear()
+                    cachedLocalSendPeers.addAll(LocalSendRuntimeBridge.snapshotPeers())
+                    applyMergedNeighborPeers()
+                    tick += 1
+                    delay(700)
+                }
+            }
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .fillMaxHeight(0.9f)
-                    .verticalScroll(rememberScrollState())
                     .padding(20.dp),
-                verticalArrangement = Arrangement.spacedBy(14.dp)
+                verticalArrangement = Arrangement.spacedBy(12.dp)
             ) {
-                Text("二维码分享", fontSize = 24.sp, fontWeight = FontWeight.Bold)
-                selectedFileName?.let {
-                    Text("当前内容：$it", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-                serverUrl?.let { url ->
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable {
-                                pendingCopyUrl = url
-                                showCopyUrlConfirmDialog = true
-                            },
-                        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
-                        shape = RoundedCornerShape(12.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(6.dp)
-                        ) {
-                            Text("下载地址", fontWeight = FontWeight.SemiBold)
-                            Text(url, fontSize = 12.sp)
-                        }
-                    }
-                }
-                if (serverUrl != null && ((selectedFileUri != null && !selectedFileMimeType.isNullOrBlank()) || currentBatchShareUris.isNotEmpty())) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        HighlightToggleButton(
-                            label = "IPv4",
-                            selected = networkShareMode == 0,
-                            onClick = {
-                                if (networkShareMode != 0) {
-                                    networkShareMode = 0
-                                    scope.launch { refreshCurrentFileShareQr() }
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        HighlightToggleButton(
-                            label = "IPv6",
-                            selected = networkShareMode == 1,
-                            onClick = {
-                                if (networkShareMode != 1) {
-                                    networkShareMode = 1
-                                    scope.launch { refreshCurrentFileShareQr() }
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        )
-                        OutlinedButton(
-                            onClick = { scope.launch { refreshCurrentFileShareQr() } },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("刷新")
-                        }
-                    }
-                }
-                Card(
+                Text(
+                    if (neighborPageEnabled && qrDetailPagerState.currentPage == 1) "邻居发现" else "二维码分享",
+                    fontSize = 24.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                HorizontalPager(
+                    state = qrDetailPagerState,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(1f),
-                    shape = RoundedCornerShape(16.dp)
-                ) {
-                    Box(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .background(Color.White)
-                            .padding(16.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Image(
-                            bitmap = qrCodeBitmap!!.asImageBitmap(),
-                            contentDescription = "share_qrcode_detail",
-                            modifier = Modifier.fillMaxSize()
-                        )
+                        .weight(1f),
+                    userScrollEnabled = neighborPageEnabled
+                ) { detailPage ->
+                    if (detailPage == 0) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            selectedFileName?.let {
+                                Text("当前内容：$it", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            serverUrl?.let { url ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            pendingCopyUrl = url
+                                            showCopyUrlConfirmDialog = true
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Column(
+                                        modifier = Modifier.padding(12.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text("下载地址", fontWeight = FontWeight.SemiBold)
+                                        Text(url, fontSize = 12.sp)
+                                    }
+                                }
+                            }
+                            if (serverUrl != null && ((selectedFileUri != null && !selectedFileMimeType.isNullOrBlank()) || currentBatchShareUris.isNotEmpty())) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    HighlightToggleButton(
+                                        label = "IPv4",
+                                        selected = networkShareMode == 0,
+                                        onClick = {
+                                            if (networkShareMode != 0) {
+                                                networkShareMode = 0
+                                                scope.launch { refreshCurrentFileShareQr() }
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    HighlightToggleButton(
+                                        label = "IPv6",
+                                        selected = networkShareMode == 1,
+                                        onClick = {
+                                            if (networkShareMode != 1) {
+                                                networkShareMode = 1
+                                                scope.launch { refreshCurrentFileShareQr() }
+                                            }
+                                        },
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    OutlinedButton(
+                                        onClick = { scope.launch { refreshCurrentFileShareQr() } },
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("刷新")
+                                    }
+                                }
+                            }
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .aspectRatio(1f),
+                                shape = RoundedCornerShape(16.dp)
+                            ) {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.White)
+                                        .padding(16.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Image(
+                                        bitmap = qrCodeBitmap!!.asImageBitmap(),
+                                        contentDescription = "share_qrcode_detail",
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        val shareUri = if (fileSendType == 2) sstvWavUri else selectedFileUri
+                                        val shareType = if (fileSendType == 2) {
+                                            "audio/wav"
+                                        } else {
+                                            shareUri?.let { getMimeType(context, it) } ?: "*/*"
+                                        }
+                                        shareUri?.let { uri ->
+                                            val chooser = Intent.createChooser(
+                                                Intent(Intent.ACTION_SEND).apply {
+                                                    type = shareType
+                                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                                },
+                                                "其他方式发送"
+                                            ).apply {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                            runCatching { context.startActivity(chooser) }
+                                                .onFailure { err ->
+                                                    errorMessage = "调用系统分享失败：${err.message ?: "unknown"}"
+                                                }
+                                        } ?: serverUrl?.let { url ->
+                                            val chooser = Intent.createChooser(
+                                                Intent(Intent.ACTION_SEND).apply {
+                                                    type = "text/plain"
+                                                    putExtra(Intent.EXTRA_TEXT, url)
+                                                },
+                                                "分享下载地址"
+                                            ).apply {
+                                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                            }
+                                            runCatching { context.startActivity(chooser) }
+                                                .onFailure { err ->
+                                                    errorMessage = "调用系统分享失败：${err.message ?: "unknown"}"
+                                                }
+                                        } ?: run {
+                                            errorMessage = "当前没有可发送的文件。"
+                                        }
+                                    },
+                                    modifier = Modifier.weight(1f),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                                ) {
+                                    Icon(Icons.Default.Send, contentDescription = null)
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("其他方式发送")
+                                }
+                                Button(
+                                    onClick = { stopShareSession() },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text("停止分享")
+                                }
+                            }
+                        }
+                    } else {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState()),
+                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        if (neighborInfiniteScan) {
+                                            neighborInfiniteScan = false
+                                            neighborScanJob?.cancel()
+                                        } else {
+                                            neighborInfiniteScan = true
+                                            requestScanNeighbors()
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(46.dp),
+                                    colors = if (neighborInfiniteScan) {
+                                        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                    } else {
+                                        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                    }
+                                ) {
+                                    Text(if (neighborInfiniteScan) "停止刷新" else "开始刷新")
+                                }
+                                OutlinedButton(
+                                    onClick = {
+                                        showManualNeighborIpDialog = true
+                                    },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(46.dp)
+                                ) {
+                                    Text("手动输入IP")
+                                }
+                            }
+                            if (neighborInfiniteScan) {
+                                Text(
+                                    "无限探测中",
+                                    color = MaterialTheme.colorScheme.primary,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            if (manualNeighborIp.isNotBlank()) {
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(
+                                            "手动目标：$manualNeighborIp",
+                                            fontSize = 12.sp,
+                                            modifier = Modifier.weight(1f)
+                                        )
+                                        OutlinedButton(
+                                            onClick = { requestScanNeighbors(targetIp = manualNeighborIp) }
+                                        ) { Text("探测") }
+                                        Button(
+                                            onClick = { scope.launch { sendQuickInviteSmart(manualNeighborIp) } },
+                                            enabled = serverUrl != null || selectedFileUri != null || currentBatchShareUris.isNotEmpty()
+                                        ) { Text("发送") }
+                                        OutlinedButton(
+                                            onClick = { scope.launch { sendQuickInviteSmart(manualNeighborIp, forceReverse = true) } },
+                                            enabled = serverUrl != null || selectedFileUri != null || currentBatchShareUris.isNotEmpty()
+                                        ) { Text("反向") }
+                                    }
+                                }
+                            }
+                            Text("在线邻居（${neighborPeers.size}）", fontWeight = FontWeight.SemiBold)
+                            if (neighborPeers.isEmpty()) {
+                                Text("暂无邻居，先点“刷新邻居”或手动输入 IP。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            neighborPeers.forEach { peer ->
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                                ) {
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                                    ) {
+                                        Text(peer.name, fontWeight = FontWeight.SemiBold)
+                                        Text(
+                                            if (peer.peerProtocol == NeighborPeerProtocol.LOCALSEND) "协议：LocalSend v2" else "协议：FileTran",
+                                            fontSize = 11.sp,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Text("${peer.ip}${if (peer.hostName.isBlank()) "" else " · ${peer.hostName}"}", fontSize = 12.sp)
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                        ) {
+                                            OutlinedButton(
+                                                onClick = { manualNeighborIp = peer.ip },
+                                                modifier = Modifier.weight(1f)
+                                            ) { Text("填入IP") }
+                                            Button(
+                                                onClick = {
+                                                    scope.launch {
+                                                        if (peer.peerProtocol == NeighborPeerProtocol.LOCALSEND) {
+                                                            sendByLocalSendPeer(peer)
+                                                        } else {
+                                                            sendQuickInviteToIp(peer.ip, forceReverse = false)
+                                                        }
+                                                    }
+                                                },
+                                                modifier = Modifier.weight(1f),
+                                                enabled = if (peer.peerProtocol == NeighborPeerProtocol.LOCALSEND) {
+                                                    selectedFileUri != null || currentBatchShareUris.isNotEmpty()
+                                                } else {
+                                                    serverUrl != null
+                                                }
+                                            ) {
+                                                Text(if (peer.peerProtocol == NeighborPeerProtocol.LOCALSEND) "LocalSend发送" else "FileTran发送")
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Text("历史目标（${neighborHistory.size}）", fontWeight = FontWeight.SemiBold)
+                            if (neighborHistory.isEmpty()) {
+                                Text("暂无历史记录。", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            neighborHistory.forEach { item ->
+                                Card(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f))
+                                ) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(10.dp),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(item.name.ifBlank { "FileTran 邻居" }, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                                            Text("${item.ip}${if (item.hostName.isBlank()) "" else " · ${item.hostName}"}", fontSize = 12.sp)
+                                        }
+                                        OutlinedButton(
+                                            onClick = { scope.launch { sendQuickInviteSmart(item.ip) } },
+                                            enabled = serverUrl != null || selectedFileUri != null || currentBatchShareUris.isNotEmpty()
+                                        ) { Text("发送") }
+                                        OutlinedButton(
+                                            onClick = { scope.launch { sendQuickInviteSmart(item.ip, forceReverse = true) } },
+                                            enabled = serverUrl != null || selectedFileUri != null || currentBatchShareUris.isNotEmpty()
+                                        ) { Text("反向") }
+                                        TextButton(
+                                            onClick = {
+                                                NeighborHistoryStore.delete(context, item.ip)
+                                                refreshNeighborHistory()
+                                            }
+                                        ) { Text("删除") }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Button(
-                        onClick = {
-                            val shareUri = if (fileSendType == 2) sstvWavUri else selectedFileUri
-                            val shareType = if (fileSendType == 2) {
-                                "audio/wav"
-                            } else {
-                                shareUri?.let { getMimeType(context, it) } ?: "*/*"
-                            }
-                            shareUri?.let { uri ->
-                                val chooser = Intent.createChooser(
-                                    Intent(Intent.ACTION_SEND).apply {
-                                        type = shareType
-                                        putExtra(Intent.EXTRA_STREAM, uri)
-                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                    },
-                                    "其他方式发送"
-                                ).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                runCatching { context.startActivity(chooser) }
-                                    .onFailure { err ->
-                                        errorMessage = "调用系统分享失败：${err.message ?: "unknown"}"
-                                    }
-                            } ?: serverUrl?.let { url ->
-                                val chooser = Intent.createChooser(
-                                    Intent(Intent.ACTION_SEND).apply {
-                                        type = "text/plain"
-                                        putExtra(Intent.EXTRA_TEXT, url)
-                                    },
-                                    "分享下载地址"
-                                ).apply {
-                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                }
-                                runCatching { context.startActivity(chooser) }
-                                    .onFailure { err ->
-                                        errorMessage = "调用系统分享失败：${err.message ?: "unknown"}"
-                                    }
-                            } ?: run {
-                                errorMessage = "当前没有可发送的文件。"
-                            }
-                        },
-                        modifier = Modifier.weight(1f),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.secondary)
+                if (neighborPageEnabled) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Center,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(Icons.Default.Send, contentDescription = null)
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text("其他方式发送")
-                    }
-                    Button(
-                        onClick = { stopShareSession() },
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Text("停止分享")
+                        repeat(2) { index ->
+                            Box(
+                                modifier = Modifier
+                                    .padding(horizontal = 6.dp, vertical = 4.dp)
+                                    .size(if (qrDetailPagerState.currentPage == index) 10.dp else 8.dp)
+                                    .background(
+                                        if (qrDetailPagerState.currentPage == index) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.35f)
+                                        },
+                                        shape = RoundedCornerShape(50)
+                                    )
+                                    .clickable {
+                                        scope.launch { qrDetailPagerState.animateScrollToPage(index) }
+                                    }
+                            )
+                        }
                     }
                 }
             }
         }
+    }
+    if (showManualNeighborIpDialog) {
+        var manualInputDraft by remember(manualNeighborIp) { mutableStateOf(manualNeighborIp) }
+        AlertDialog(
+            onDismissRequest = { showManualNeighborIpDialog = false },
+            title = { Text("手动输入目标IP") },
+            text = {
+                OutlinedTextField(
+                    value = manualInputDraft,
+                    onValueChange = { manualInputDraft = it.trim() },
+                    label = { Text("目标 IPv4") },
+                    placeholder = {
+                        Text(
+                            buildLocalIpv4Prefix(context).ifBlank { "例如 192.168.1.88" } + if (buildLocalIpv4Prefix(context).isBlank()) "" else "88"
+                        )
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        manualNeighborIp = manualInputDraft
+                        showManualNeighborIpDialog = false
+                    }
+                ) { Text("确定") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        manualNeighborIp = ""
+                        showManualNeighborIpDialog = false
+                    }
+                ) { Text("清空") }
+            }
+        )
+    }
+    if (showQuickInviteProgressDialog) {
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text("发送进度") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(quickInviteProgressText)
+                    LinearProgressIndicator(
+                        progress = { quickInviteProgress.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val forceCancelAction = quickInviteForceCancelAction
+                        if (forceCancelAction != null) {
+                            forceCancelAction()
+                        } else {
+                            quickInviteSendCancelled = true
+                        }
+                    }
+                ) {
+                    Text("中断发送")
+                }
+            }
+        )
+    }
+    quickInviteBusyDialogMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { quickInviteBusyDialogMessage = null },
+            title = { Text("对方正忙") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { quickInviteBusyDialogMessage = null }) {
+                    Text("知道了")
+                }
+            }
+        )
+    }
+    quickInviteRejectDialogMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { quickInviteRejectDialogMessage = null },
+            title = { Text("对方已拒绝") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { quickInviteRejectDialogMessage = null }) {
+                    Text("知道了")
+                }
+            }
+        )
+    }
+    quickInviteTimeoutDialogMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { quickInviteTimeoutDialogMessage = null },
+            title = { Text("发送超时") },
+            text = { Text(message) },
+            confirmButton = {
+                TextButton(onClick = { quickInviteTimeoutDialogMessage = null }) {
+                    Text("知道了")
+                }
+            }
+        )
     }
     if (showQrExitConfirmDialog && showQrDetailPage) {
         AlertDialog(
@@ -4541,6 +7315,12 @@ fun FileTransferScreen(
             Tab(
                 selected = selectedMode == 1,
                 onClick = { selectedMode = 1 },
+                text = { Text("增强传输模式") },
+                icon = { Icon(Icons.Default.Wifi, contentDescription = null) }
+            )
+            Tab(
+                selected = selectedMode == 2,
+                onClick = { selectedMode = 2 },
                 text = { Text("剪贴板与文本") },
                 icon = { Icon(Icons.Default.TextSnippet, contentDescription = null) }
             )
@@ -4555,12 +7335,12 @@ fun FileTransferScreen(
                     modifier = Modifier.padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    Text("普通文件发送", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-                    Text(
-                        text = "选择任意文件后会自动启动局域网文件服务，并生成下载二维码。",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Text("文件分享", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    if (fileSendType == 0) {
+                        FileShareHeroCard(
+                            onClick = { showFilePickOptionSheet = true }
+                        )
+                    }
 
                     if (fileSendType == 0) {
                         Text(
@@ -4583,20 +7363,13 @@ fun FileTransferScreen(
                                 selected = networkShareMode == 1,
                                 onClick = { networkShareMode = 1 },
                                 modifier = Modifier.weight(1f)
-                                )
-                            }
-                        OutlinedButton(
-                            onClick = { showIpv4UdpEnhancedSend = true },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("IPv4 增强传输（UDP 打洞后直传）")
+                            )
                         }
-                        OutlinedButton(
-                            onClick = { showIpv6UdpEnhancedSend = true },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("IPv6 增强传输（UDP 打洞后直传）")
-                        }
+                        Text(
+                            "当前端口：$manualPortInput · ${if (shareRandomPortEnabled) "随机" else "固定"}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                         if (networkShareMode == 1) {
                             Text(
                                 text = "说明：两台手机位于同一基站时，可能受客户端隔离影响导致不通；部分省份/运营商默认禁止入站或存在防火墙策略，也会导致 IPv6 不通。",
@@ -4604,15 +7377,6 @@ fun FileTransferScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        OutlinedTextField(
-                            value = manualPortInput,
-                            onValueChange = { manualPortInput = it.filter { ch -> ch.isDigit() } },
-                            label = { Text("端口") },
-                            placeholder = { Text("1024-65535") },
-                            modifier = Modifier.fillMaxWidth(),
-                            singleLine = true,
-                            enabled = true
-                        )
                         Row(
                             modifier = Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.SpaceBetween,
@@ -4639,47 +7403,8 @@ fun FileTransferScreen(
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text("反向传输（PUSH）", fontWeight = FontWeight.SemiBold)
-                                Text(
-                                    "适用于发送端不允许入站、接收端允许入站的场景",
-                                    fontSize = 12.sp,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            Switch(
-                                checked = reversePushEnabled,
-                                onCheckedChange = {
-                                    reversePushEnabled = it
-                                    if (it) {
-                                        showReversePushConfigSheet = true
-                                    } else {
-                                        showReversePendingSheet = false
-                                    }
-                                }
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = { showReversePushConfigSheet = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = reversePushEnabled
-                        ) {
-                            Text("反向传输参数")
-                        }
-                        if (reversePushEnabled && reversePushAddress.isNotBlank()) {
-                            Text(
-                                text = "当前上传地址：$reversePushAddress",
-                                fontSize = 12.sp,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
                     }
-                    if (allowedFileSendTypes.contains(1)) {
+                    if (supportsSendType(1)) {
                         OutlinedButton(
                             onClick = {
                                 fileSendType = 1
@@ -4835,30 +7560,109 @@ fun FileTransferScreen(
                             }
                         }
                     }
-                    if (!(fileSendType == 0 && reversePushEnabled)) {
+                    if (fileSendType != 0) {
                         Button(
                             onClick = {
                                 if (fileSendType == 2) {
                                     filePickerLauncher.launch("image/*")
-                                } else if (fileSendType == 0) {
-                                    showFilePickOptionSheet = true
                                 } else {
                                     filePickerLauncher.launch("*/*")
                                 }
                             },
-                            modifier = Modifier.fillMaxWidth(),
-                            enabled = !(fileSendType == 0 && reversePushEnabled && !reversePushReady)
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(58.dp)
                         ) {
                             Text(
-                                when (fileSendType) {
+                                text = when (fileSendType) {
                                     1 -> "选择文件（CIMBAR）"
                                     2 -> "选择图片并生成 SSTV 音频"
                                     else -> "选择文件并生成二维码"
-                                }
+                                },
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold
                             )
                         }
                     }
-                    if (fileSendType == 0 && reversePushEnabled) {
+                }
+            }
+        } else if (selectedMode == 1) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text("增强传输模式", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                    OutlinedButton(
+                        onClick = { showIpv4UdpEnhancedSend = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("IPv4 增强传输")
+                    }
+                    OutlinedButton(
+                        onClick = { showIpv6UdpEnhancedSend = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("IPv6 增强传输")
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("反向传输（PUSH）", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "适用于发送端不允许入站、接收端允许入站的场景",
+                                fontSize = 12.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = reversePushEnabled,
+                            onCheckedChange = {
+                                reversePushEnabled = it
+                                if (it) {
+                                    showReversePushConfigSheet = true
+                                } else {
+                                    showReversePendingSheet = false
+                                }
+                            }
+                        )
+                    }
+                    if (reversePushEnabled && reversePushAddress.isNotBlank()) {
+                        Text(
+                            "当前上传地址：$reversePushAddress",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = { showReversePushConfigSheet = true },
+                            modifier = Modifier.weight(1f),
+                            enabled = reversePushEnabled
+                        ) {
+                            Text("反向参数")
+                        }
+                        Button(
+                            onClick = {
+                                fileSendType = 0
+                                showFilePickOptionSheet = true
+                            },
+                            modifier = Modifier.weight(1f),
+                            enabled = reversePushEnabled
+                        ) {
+                            Text("添加文件")
+                        }
+                    }
+                    if (reversePushEnabled) {
                         OutlinedButton(
                             onClick = { showReversePendingSheet = true },
                             modifier = Modifier.fillMaxWidth(),
@@ -4875,84 +7679,129 @@ fun FileTransferScreen(
                             }
                         }
                     }
-                    if (!(fileSendType == 0 && reversePushEnabled)) {
-                        OutlinedButton(
-                            onClick = { scope.launch { shareSelfApkByQr() } },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("提取并分享本应用 APK（扫码安装）")
-                        }
-                        OutlinedButton(
-                            onClick = { showInstalledApkPicker = true },
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Text("提取其他应用 APK 并分享")
-                        }
-                    }
                 }
             }
         } else {
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp)
-            ) {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+            val (clipboardGroupLabel, clipboardGroupPreview) = describeClipboardContent()
+            val clipboardShareReady = clipboardGroupLabel != "剪贴板为空" && clipboardGroupLabel != "暂不支持的剪贴板内容"
+            val trimmedCustomText = customText.trim()
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
                 ) {
-                    Text("剪贴板/文本发送", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-                    Text(
-                        text = "短文本会直接编码成二维码；超长文本会自动转为文本文件分享。",
-                        fontSize = 13.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "当超长文本转文件分享时，会进入二级页面选择 IPv4/IPv6 与端口。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        text = "新增：支持实时双向剪贴板共享（二级页面），可后台保活、探测在线状态并自动重连。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-
-                    OutlinedButton(
-                        onClick = { scope.launch { shareClipboardContent() } },
-                        modifier = Modifier.fillMaxWidth()
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(Icons.Default.ContentPaste, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("直接发送剪贴板")
+                        Text("剪贴板", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                        OutlinedTextField(
+                            value = if (clipboardShareReady) clipboardGroupPreview else "",
+                            onValueChange = {},
+                            readOnly = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            minLines = 4,
+                            maxLines = 8,
+                            label = { Text(clipboardGroupLabel) },
+                            placeholder = {
+                                Text(
+                                    if (clipboardGroupLabel == "剪贴板为空") {
+                                        "当前没有可发送的剪贴板内容"
+                                    } else {
+                                        "当前剪贴板类型暂不支持"
+                                    }
+                                )
+                            }
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    scope.launch { shareClipboardContent() }
+                                },
+                                enabled = clipboardShareReady,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.ContentPaste, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("直接分享")
+                            }
+                            OutlinedButton(
+                                onClick = { showClipboardActionSheet = true },
+                                enabled = clipboardShareReady,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("LocalSend")
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = { showClipboardSyncPage = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Icon(Icons.Default.Wifi, contentDescription = null)
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text("进入剪贴板共享（实时）")
+                        }
                     }
-                    OutlinedButton(
-                        onClick = { showClipboardSyncPage = true },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Icon(Icons.Default.Wifi, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("进入剪贴板共享（实时）")
-                    }
+                }
 
-                    OutlinedTextField(
-                        value = customText,
-                        onValueChange = { customText = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(min = 120.dp, max = 220.dp),
-                        minLines = 4,
-                        maxLines = 8,
-                        label = { Text("自定义文本") },
-                        placeholder = { Text("输入文本后点击下方按钮") }
-                    )
-
-                    Button(
-                        onClick = { scope.launch { shareTextContent(customText, "自定义文本") } },
-                        modifier = Modifier.fillMaxWidth()
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Icon(Icons.Default.QrCode, contentDescription = null)
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("生成文本分享码")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text("文本", fontWeight = FontWeight.SemiBold, fontSize = 18.sp, modifier = Modifier.weight(1f))
+                            TextButton(
+                                onClick = { customText = "" },
+                                enabled = customText.isNotEmpty()
+                            ) {
+                                Text("一键清空")
+                            }
+                        }
+                        OutlinedTextField(
+                            value = customText,
+                            onValueChange = { customText = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(min = 140.dp, max = 240.dp),
+                            minLines = 5,
+                            maxLines = 10,
+                            label = { Text("自定义文本") },
+                            placeholder = { Text("输入要分享的文本") }
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Button(
+                                onClick = {
+                                    scope.launch { shareTextContent(customText, "自定义文本") }
+                                },
+                                enabled = trimmedCustomText.isNotBlank(),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Icon(Icons.Default.QrCode, contentDescription = null)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("生成分享码")
+                            }
+                            OutlinedButton(
+                                onClick = { showTextActionSheet = true },
+                                enabled = trimmedCustomText.isNotBlank(),
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("LocalSend")
+                            }
+                        }
                     }
                 }
             }
@@ -5560,6 +8409,7 @@ private fun formatSize(bytes: Long): String {
         else -> String.format("%.2f GB", bytes / (1024.0 * 1024.0 * 1024.0))
     }
 }
+
 
 
 

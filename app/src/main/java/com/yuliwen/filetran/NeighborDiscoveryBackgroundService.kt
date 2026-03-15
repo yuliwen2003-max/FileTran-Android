@@ -563,7 +563,9 @@ class NeighborDiscoveryBackgroundService : Service() {
                     downloaded.toFloat() / total.toFloat()
                 } else {
                     0f
-                }.coerceIn(0f, 0.99f)
+                }.let { raw ->
+                    if (total > 0L && downloaded >= total) 1f else raw.coerceIn(0f, 0.99f)
+                }
                 showReceiveNotification(
                     requestId = event.sessionId,
                     name = fileName,
@@ -572,6 +574,32 @@ class NeighborDiscoveryBackgroundService : Service() {
                     total = total,
                     speed = 0L
                 )
+            }
+
+            LocalSendReceiveStage.MESSAGE_RECEIVED -> {
+                receivingRequestId = null
+                overlayHiddenDuringReceive = false
+                receiveNotificationOnly = false
+                dismissReceiveNotification()
+                val copied = copyPlainTextToClipboard(
+                    context = this,
+                    label = if (event.fileName.startsWith("clipboard_", ignoreCase = true)) {
+                        "localsend_clipboard"
+                    } else {
+                        "localsend_text"
+                    },
+                    text = event.textContent.ifBlank { event.message }
+                )
+                withContext(Dispatchers.Main) {
+                    hideSheet()
+                    toast(
+                        if (copied) {
+                            "LocalSend 文本已复制到剪贴板。"
+                        } else {
+                            "LocalSend 文本已收到。"
+                        }
+                    )
+                }
             }
 
             LocalSendReceiveStage.COMPLETED -> {
@@ -602,11 +630,14 @@ class NeighborDiscoveryBackgroundService : Service() {
                 overlayHiddenDuringReceive = false
                 receiveNotificationOnly = false
                 dismissReceiveNotification()
-                val msg = event.message.ifBlank {
-                    if (event.stage == LocalSendReceiveStage.CANCELLED) {
-                        "LocalSend sender cancelled"
-                    } else {
-                        "LocalSend receive failed"
+                val msg = when (event.message.trim()) {
+                    "network_interrupted" -> "LocalSend 接收已中断，网络连接已断开。"
+                    else -> event.message.ifBlank {
+                        if (event.stage == LocalSendReceiveStage.CANCELLED) {
+                            "LocalSend sender cancelled"
+                        } else {
+                            "LocalSend receive failed"
+                        }
                     }
                 }
                 withContext(Dispatchers.Main) {
@@ -1014,7 +1045,9 @@ class NeighborDiscoveryBackgroundService : Service() {
                     progress.receivedBytes.toFloat() / total.toFloat()
                 } else {
                     0f
-                }.coerceIn(0f, 0.99f)
+                }.let { raw ->
+                    if (total > 0L && progress.receivedBytes >= total) 1f else raw.coerceIn(0f, 0.99f)
+                }
                 withContext(Dispatchers.Main) {
                     if (receiveNotificationOnly || overlayHiddenDuringReceive) {
                         showReceiveNotification(
