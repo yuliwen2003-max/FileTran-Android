@@ -1258,6 +1258,9 @@ fun TransferLabScreen(
     var showSstv by rememberSaveable { mutableStateOf(false) }
     var showNfc by rememberSaveable { mutableStateOf(false) }
     var showCimbar by rememberSaveable { mutableStateOf(false) }
+    var showWireGuard by rememberSaveable { mutableStateOf(false) }
+    var showMeshNet by rememberSaveable { mutableStateOf(false) }
+    var showUdpMeshNet by rememberSaveable { mutableStateOf(false) }
     val isSecondaryPageOpen =
         showNatTypeDetect ||
             showNat34Punch ||
@@ -1271,7 +1274,10 @@ fun TransferLabScreen(
             showAcoustic ||
             showSstv ||
             showNfc ||
-            showCimbar
+            showCimbar ||
+            showWireGuard ||
+            showMeshNet ||
+            showUdpMeshNet
     LaunchedEffect(isSecondaryPageOpen) {
         onSecondaryPageChanged(isSecondaryPageOpen)
     }
@@ -1330,6 +1336,18 @@ fun TransferLabScreen(
     }
     if (showCimbar) {
         CimbarTransferScreen(onBack = { showCimbar = false })
+        return
+    }
+    if (showWireGuard) {
+        WireGuardVpnScreen(onBack = { showWireGuard = false })
+        return
+    }
+    if (showMeshNet) {
+        MeshNetScreen(onBack = { showMeshNet = false })
+        return
+    }
+    if (showUdpMeshNet) {
+        UdpMeshNetScreen(onBack = { showUdpMeshNet = false })
         return
     }
 
@@ -1426,6 +1444,33 @@ fun TransferLabScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("IPv6打洞验证")
+                }
+                OutlinedButton(
+                    onClick = { showMeshNet = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("异地组网 (FileTran)")
+                }
+                OutlinedButton(
+                    onClick = { showUdpMeshNet = true },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        contentColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(
+                        Icons.Default.Wifi,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text("异地组网 (FileTran Over UDP)", fontWeight = FontWeight.SemiBold)
+                }
+                OutlinedButton(
+                    onClick = { showWireGuard = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("异地组网 (WireGuard)")
                 }
             }
         }
