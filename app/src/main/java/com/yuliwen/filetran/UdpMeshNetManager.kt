@@ -1,4 +1,4 @@
-﻿package com.yuliwen.filetran
+package com.yuliwen.filetran
 
 import android.util.Base64
 import android.util.Log
@@ -16,6 +16,12 @@ import javax.crypto.KeyAgreement
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.SecretKeySpec
 import kotlin.concurrent.thread
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 
 // ============================================================
 // 鍗忚甯搁噺
@@ -191,8 +197,14 @@ data class UdpMeshConfig(
     val maxRetryCount       : Int         = 0,
     /** STUN 探测得到的公网映射端口（0=未探测），服务端用于打洞模式 */
     val stunMappedPort      : Int         = 0,
-    /** 隧道走的网络接口（留空=系统默认），用于移动数据IPv6+WiFi内网场景 */
-    val tunnelIface         : String      = ""
+    /** 隧道走的网络接口（留空=系统默认），用于移动数据IPv6+WiFi内网场景
+     *  例：有 IPv6 的 wlan1 / rmnet_data0（移动数据），ACK/握手包从此接口出 */
+    val tunnelIface         : String      = "",
+    /** 内网接口（留空=自动），仅当 tunnelIface 非空时有意义。
+     *  指定本机连接内网的那个接口（如公司内网 WiFi wlan0），
+     *  内网路由/iptables 规则走此接口而非 tunnelIface。
+     *  留空时自动从非隧道接口中选一个有 IPv4 的接口。 */
+    val lanIface            : String      = "",
 )
 
 fun udpMeshConfigToJson(cfg: UdpMeshConfig): String = org.json.JSONObject().apply {
@@ -215,6 +227,7 @@ fun udpMeshConfigToJson(cfg: UdpMeshConfig): String = org.json.JSONObject().appl
     put("maxRetryCount",   cfg.maxRetryCount)
     put("stunMappedPort",  cfg.stunMappedPort)
     put("tunnelIface",     cfg.tunnelIface)
+    put("lanIface",        cfg.lanIface)
 }.toString()
 
 fun parseUdpMeshConfig(json: String): UdpMeshConfig {
@@ -238,7 +251,8 @@ fun parseUdpMeshConfig(json: String): UdpMeshConfig {
         retryIntervalSec = o.optInt("retryIntervalSec",  10),
         maxRetryCount    = o.optInt("maxRetryCount",      0),
         stunMappedPort   = o.optInt("stunMappedPort",     0),
-        tunnelIface      = o.optString("tunnelIface",     "")
+        tunnelIface      = o.optString("tunnelIface",     ""),
+        lanIface         = o.optString("lanIface",         "")
     )
 }
 
@@ -259,7 +273,10 @@ class UdpMeshTunnel(
     private val onHandshakeDone : (localVpnIp: String, peerVpnIp: String) -> Unit,
     private val onDisconnected  : (String) -> Unit,
     /** VpnService.protect(socket) 回调，防止隧道 Socket 被 VPN 自身拦截 */
-    private val protectSocket   : ((java.net.DatagramSocket) -> Unit)? = null
+    private val protectSocket   : ((java.net.DatagramSocket) -> Unit)? = null,
+    /** 将 socket 绑定到指定网络接口，确保从正确出口发包（双接口场景）
+     *  由 Service 层用 ConnectivityManager.bindSocket 实现 */
+    private val bindSocketToIface: ((java.net.DatagramSocket, String) -> Unit)? = null
 ) {
     @Volatile var isRunning = false
         private set
@@ -338,6 +355,10 @@ class UdpMeshTunnel(
             // 保护隧道 Socket，防止被 VPN 自身拦截（对所有模式都有效）
             protectSocket?.invoke(sock)
             Log.i(UDP_TAG, "[Socket] protect 已调用 fd=${sock.localPort}")
+            // 绑定到指定接口，确保握手/数据包从正确网卡出去（双接口场景）
+            if (cfg.tunnelIface.isNotBlank()) {
+                bindSocketToIface?.invoke(sock, cfg.tunnelIface)
+            }
             onStateChange("UDP Socket 就绪，握手中…")
             val ok = when (cfg.role) {
                 UdpMeshRole.SERVER -> doServerHandshake(sock)
@@ -367,7 +388,34 @@ class UdpMeshTunnel(
         UdpMeshRole.SERVER -> {
             // stunMappedPort > 0 时绑定打洞映射端口，否则绑定配置端口
             val bindPort = if (cfg.stunMappedPort > 0) cfg.stunMappedPort else cfg.listenPort
-            val sock = try {
+            // tunnelIface 非空时，服务端也绑定到指定接口的地址，确保 ACK/握手回包
+            // 从正确的出口（有 IPv6 的接口）发出，而不是走默认路由（可能走内网 WiFi）
+            val sock = if (cfg.tunnelIface.isNotBlank()) {
+                try {
+                    val iface = java.net.NetworkInterface.getByName(cfg.tunnelIface)
+                    val addrs = iface?.inetAddresses?.toList() ?: emptyList()
+                    // 优先绑定 IPv6（全局），其次 IPv4
+                    val bindAddr: java.net.InetAddress? =
+                        addrs.filterIsInstance<java.net.Inet6Address>()
+                            .firstOrNull { !it.isLoopbackAddress && !it.isLinkLocalAddress }
+                            ?: addrs.filterIsInstance<java.net.Inet4Address>()
+                            .firstOrNull { !it.isLoopbackAddress }
+                    if (bindAddr != null && iface != null) {
+                        DatagramSocket(null).also {
+                            it.reuseAddress = true
+                            it.bind(InetSocketAddress(bindAddr, bindPort))
+                            Log.i(UDP_TAG, "[服务端] 绑定到接口 ${cfg.tunnelIface} addr=${bindAddr.hostAddress} port=$bindPort")
+                        }
+                    } else {
+                        Log.w(UDP_TAG, "[服务端] 接口 ${cfg.tunnelIface} 无可用地址，回退双栈")
+                        null
+                    }
+                } catch (e: Exception) {
+                    Log.w(UDP_TAG, "[服务端] 绑定接口 ${cfg.tunnelIface} 失败: ${e.message}，回退双栈")
+                    null
+                }
+            } else null
+            ?: try {
                 DatagramSocket(null).also {
                     it.reuseAddress = true
                     it.bind(InetSocketAddress("::", bindPort))
@@ -381,10 +429,11 @@ class UdpMeshTunnel(
                     Log.i(UDP_TAG, "[服务端] IPv4 绑定 0.0.0.0:$bindPort")
                 }
             }
-            sock.soTimeout = 500
-            sock
+            sock!!.soTimeout = 500
+            sock!!
         }
         UdpMeshRole.CLIENT -> {
+            val natPort = if (NatPunchResult.isReady) UdpNatPunch.NAT_PORT else 0
             // tunnelIface 非空时绑定指定接口（如移动数据网卡），实现隧道走移动网络
             val sock = if (cfg.tunnelIface.isNotBlank()) {
                 try {
@@ -396,19 +445,24 @@ class UdpMeshTunnel(
                     if (addr != null) {
                         DatagramSocket(null).also {
                             it.reuseAddress = true
-                            it.bind(InetSocketAddress(addr, 0))
+                            it.bind(InetSocketAddress(addr, natPort))
                             Log.i(UDP_TAG, "[客户端] 绑定接口 ${cfg.tunnelIface} addr=${addr.hostAddress} port=${it.localPort}")
                         }
                     } else {
                         Log.w(UDP_TAG, "[客户端] 接口 ${cfg.tunnelIface} 无可用地址，回退默认")
-                        DatagramSocket()
+                        DatagramSocket(null).also { it.reuseAddress = true; it.bind(InetSocketAddress("0.0.0.0", natPort)) }
                     }
                 } catch (e: Exception) {
                     Log.w(UDP_TAG, "[客户端] 绑定接口 ${cfg.tunnelIface} 失败: ${e.message}，回退默认")
-                    DatagramSocket()
+                    DatagramSocket(null).also { it.reuseAddress = true; it.bind(InetSocketAddress("0.0.0.0", natPort)) }
                 }
             } else {
-                DatagramSocket()
+                // 普通模式随机端口，NAT 打洞模式绑定 10002
+                DatagramSocket(null).also {
+                    it.reuseAddress = true
+                    it.bind(InetSocketAddress("0.0.0.0", natPort))
+                    Log.i(UDP_TAG, "[客户端] 绑定端口 ${it.localPort}${if (natPort > 0) "（NAT 打洞固定端口）" else "（随机端口）"}")
+                }
             }
             sock.soTimeout = 500
             Log.i(UDP_TAG, "[客户端] 本地端口 ${sock.localPort}")
@@ -426,7 +480,23 @@ class UdpMeshTunnel(
         var helloPayload: ByteArray? = null
         var clientEp: InetSocketAddress? = null
         val deadline = System.currentTimeMillis() + 120_000L
+
+        // NAT 打洞模式：主动向客户端 NAT 端点发 UDP 打洞包，维持双向 NAT 映射
+        val natPeer = if (NatPunchResult.isReady && NatPunchResult.peerIp.isNotBlank() && NatPunchResult.peerPort > 0) {
+            runCatching { InetSocketAddress(NatPunchResult.peerIp, NatPunchResult.peerPort) }.getOrNull()
+        } else null
+        val punchBytes = "FILETRAN_NAT_PUNCH_KEEP".toByteArray()
+        var lastPunchMs = 0L
+
         while (isRunning && System.currentTimeMillis() < deadline) {
+            // NAT 打洞：每 500ms 向客户端 NAT 端点发一次打洞包，直到收到 HELLO
+            if (natPeer != null) {
+                val now = System.currentTimeMillis()
+                if (now - lastPunchMs >= 500L) {
+                    runCatching { sock.send(DatagramPacket(punchBytes, punchBytes.size, natPeer)) }
+                    lastPunchMs = now
+                }
+            }
             try {
                 pkt.length = buf.size
                 sock.receive(pkt)
@@ -613,6 +683,167 @@ class UdpMeshTunnel(
             }
         }
         Log.d(UDP_TAG, "receiveLoop 退出")
+    }
+}
+
+// ============================================================
+// NAT 打洞结果单例（打洞成功后存储，服务端配置页读取）
+// ============================================================
+object NatPunchResult {
+    @Volatile var myIp   : String = ""
+    @Volatile var myPort : Int    = 0
+    @Volatile var peerIp   : String = ""
+    @Volatile var peerPort : Int    = 0
+    /** 打洞心跳协程，返回首页后继续维持 NAT 映射，直到 VPN 隧道建立 */
+    @Volatile var heartbeatJob: kotlinx.coroutines.Job? = null
+    val isReady: Boolean get() = myIp.isNotBlank() && myPort in 1..65535
+    fun save(myIp: String, myPort: Int, peerIp: String = "", peerPort: Int = 0) {
+        this.myIp   = myIp
+        this.myPort = myPort
+        this.peerIp   = peerIp
+        this.peerPort = peerPort
+    }
+    fun stopHeartbeat() { heartbeatJob?.cancel(); heartbeatJob = null }
+    fun clear() { stopHeartbeat(); myIp = ""; myPort = 0; peerIp = ""; peerPort = 0 }
+}
+
+// ============================================================
+// NAT 打洞（照搬 Ipv4StunTcpTransferScreen.runUdpHolePunchTest 逻辑）
+// 流程：
+//   1. 双方各自用 NAT_PORT=10002 向 STUN 探测公网端点（preferIpv6 可选）
+//   2. 服务端将自己的 NAT 端点写入二维码
+//   3. 客户端扫码，同样用 NAT_PORT 探测自己端点
+//   4. 双方同时在同一端口收发 UDP 打洞包，coroutine 并发，15 秒超时
+//   5. 任意一方收到对方包即算成功，回复 ACK
+//   6. 打洞成功后服务端监听 NAT_PORT，客户端连服务端 NAT 端口
+// ============================================================
+object UdpNatPunch {
+    private const val TAG        = "UdpNatPunch"
+    const  val NAT_PORT          = 10002
+    private const val HELLO      = "FILETRAN_IPV4_STUN_HELLO"
+    private const val ACK        = "FILETRAN_IPV4_STUN_ACK"
+    private const val TIMEOUT_MS = 15_000L
+
+    /**
+     * 用 NAT_PORT 端口向 STUN 探测公网端点（同步，在 IO 线程调用）
+     * @param preferIpv6 是否优先 IPv6，默认 false（IPv4）
+     */
+    fun probeMyEndpoint(preferIpv6: Boolean = false): Pair<String, Int>? {
+        return try {
+            val ep = NetworkUtils.probeStunMappedEndpointBatch(
+                localPort  = NAT_PORT,
+                preferIpv6 = preferIpv6,
+                transport  = StunTransportType.UDP
+            ).preferredEndpoint
+            if (ep != null) {
+                Log.i(TAG, "STUN 探测结果: ${ep.address}:${ep.port}")
+                Pair(ep.address, ep.port)
+            } else null
+        } catch (e: Exception) {
+            Log.e(TAG, "STUN 探测失败: ${e.message}")
+            null
+        }
+    }
+
+    /**
+     * 双向打洞验证（完全照搬 Ipv4StunTcpTransferScreen.runUdpHolePunchTest）
+     * 同一个本地端口同时收发，coroutine 并发，15 秒超时
+     * @param localPort  本地绑定端口（双方都用 NAT_PORT=10002）
+     * @param remoteHost 对方公网 IP（STUN 探测结果）
+     * @param remotePort 对方公网端口（STUN 探测结果）
+     * @param onLog      日志回调
+     * @return true = 打洞成功
+     */
+    suspend fun doPunch(
+        localPort  : Int    = NAT_PORT,
+        remoteHost : String,
+        remotePort : Int,
+        onLog      : (String) -> Unit = {}
+    ): Boolean = withContext(Dispatchers.IO) {
+        val success         = java.util.concurrent.atomic.AtomicBoolean(false)
+        val inboundPackets  = java.util.concurrent.atomic.AtomicInteger(0)
+        val outboundPackets = java.util.concurrent.atomic.AtomicInteger(0)
+
+        val targetAddresses = runCatching {
+            InetAddress.getAllByName(remoteHost).toList()
+        }.getOrElse { e ->
+            onLog("[NAT] 无法解析对端地址: ${e.message}")
+            return@withContext false
+        }
+        if (targetAddresses.isEmpty()) {
+            onLog("[NAT] 未解析到对端地址")
+            return@withContext false
+        }
+
+        val socket = runCatching {
+            DatagramSocket(null).apply {
+                reuseAddress = true
+                soTimeout    = 700
+                bind(InetSocketAddress("0.0.0.0", localPort))
+            }
+        }.getOrElse { e ->
+            onLog("[NAT] 绑定端口 $localPort 失败: ${e.message}")
+            return@withContext false
+        }
+
+        val deadline   = System.currentTimeMillis() + TIMEOUT_MS
+        val helloBytes = HELLO.toByteArray(Charsets.UTF_8)
+        val ackBytes   = ACK.toByteArray(Charsets.UTF_8)
+
+        onLog("[NAT] 开始双向打洞: 本地端口=$localPort 对方=$remoteHost:$remotePort")
+
+        try {
+            coroutineScope {
+                val receiveTask = async {
+                    val buffer = ByteArray(2048)
+                    while (isActive && !success.get() && System.currentTimeMillis() < deadline) {
+                        try {
+                            val pkt = DatagramPacket(buffer, buffer.size)
+                            socket.receive(pkt)
+                            inboundPackets.incrementAndGet()
+                            val text = pkt.data.decodeToString(0, pkt.length)
+                            if (text.startsWith(HELLO) || text.startsWith(ACK)) {
+                                if (success.compareAndSet(false, true)) {
+                                    onLog("[NAT] ✅ 打洞成功！收到来自 ${pkt.address.hostAddress}:${pkt.port} 的包")
+                                }
+                                runCatching {
+                                    socket.send(DatagramPacket(ackBytes, ackBytes.size, pkt.address, pkt.port))
+                                }
+                            }
+                        } catch (_: SocketTimeoutException) {
+                        } catch (_: Exception) { }
+                    }
+                }
+
+                val sendTask = async {
+                    while (isActive && !success.get() && System.currentTimeMillis() < deadline) {
+                        for (addr in targetAddresses) {
+                            if (success.get() || System.currentTimeMillis() >= deadline) break
+                            runCatching {
+                                socket.send(DatagramPacket(helloBytes, helloBytes.size, addr, remotePort))
+                                outboundPackets.incrementAndGet()
+                            }
+                        }
+                        if (!success.get()) delay(260)
+                    }
+                }
+
+                while (!success.get() && System.currentTimeMillis() < deadline) {
+                    delay(120)
+                }
+                receiveTask.cancel()
+                sendTask.cancel()
+            }
+        } finally {
+            runCatching { socket.close() }
+        }
+
+        if (!success.get()) {
+            onLog("[NAT] ❌ 打洞超时（发包 ${outboundPackets.get()} 次，收包 ${inboundPackets.get()} 次）")
+        } else {
+            onLog("[NAT] 发包 ${outboundPackets.get()} 次，收包 ${inboundPackets.get()} 次")
+        }
+        success.get()
     }
 }
 

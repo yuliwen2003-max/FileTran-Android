@@ -19,20 +19,22 @@ import kotlin.concurrent.thread
 class UdpMeshNetService : VpnService() {
 
     companion object {
-        const val ACTION_START       = "com.yuliwen.filetran.UDP_MESH_START"
-        const val ACTION_STOP        = "com.yuliwen.filetran.UDP_MESH_STOP"
-        const val EXTRA_CONFIG       = "udp_mesh_config_json"
-        const val BROADCAST_STATE    = "com.yuliwen.filetran.UDP_MESH_STATE"
-        const val EXTRA_RUNNING      = "running"
-        const val EXTRA_MESSAGE      = "message"
-        const val EXTRA_LOCAL_VPN_IP = "local_vpn_ip"
-        const val EXTRA_PEER_VPN_IP  = "peer_vpn_ip"
-        const val EXTRA_RECONNECTING = "reconnecting"
-        const val EXTRA_TX_BYTES     = "tx_bytes"
-        const val EXTRA_RX_BYTES     = "rx_bytes"
-        const val EXTRA_TX_PACKETS   = "tx_packets"
-        const val EXTRA_RX_PACKETS   = "rx_packets"
-        const val EXTRA_HANDSHAKE_MS = "handshake_ms"
+        const val ACTION_START         = "com.yuliwen.filetran.UDP_MESH_START"
+        const val ACTION_STOP          = "com.yuliwen.filetran.UDP_MESH_STOP"
+        const val EXTRA_CONFIG         = "udp_mesh_config_json"
+        const val BROADCAST_STATE      = "com.yuliwen.filetran.UDP_MESH_STATE"
+        const val EXTRA_RUNNING        = "running"
+        const val EXTRA_MESSAGE        = "message"
+        const val EXTRA_LOCAL_VPN_IP   = "local_vpn_ip"
+        const val EXTRA_PEER_VPN_IP    = "peer_vpn_ip"
+        const val EXTRA_RECONNECTING   = "reconnecting"
+        const val EXTRA_TX_BYTES       = "tx_bytes"
+        const val EXTRA_RX_BYTES       = "rx_bytes"
+        const val EXTRA_TX_PACKETS     = "tx_packets"
+        const val EXTRA_RX_PACKETS     = "rx_packets"
+        const val EXTRA_HANDSHAKE_MS   = "handshake_ms"
+        const val EXTRA_MY_LAN_CIDRS   = "my_lan_cidrs"
+        const val EXTRA_PEER_LAN_CIDRS = "peer_lan_cidrs"
 
         private const val CHANNEL_ID = "udp_mesh_vpn"
         private const val NOTIF_ID   = 9902
@@ -52,11 +54,8 @@ class UdpMeshNetService : VpnService() {
     private val stopping = AtomicBoolean(false)
     private val tunWriteQueue = LinkedBlockingQueue<ByteArray>(4096)
 
-    // 自动重试状态
     private var retryCount = 0
     private var lastCfg: UdpMeshConfig? = null
-
-    // Root 路由清理命令列表
     private val rootCleanupCmds = mutableListOf<String>()
 
     @Volatile private var myLanCidrList   : List<String> = emptyList()
@@ -67,7 +66,6 @@ class UdpMeshNetService : VpnService() {
         when (intent?.action) {
             ACTION_STOP -> {
                 stopping.set(true)
-                // 立即广播断开，不等 teardown，解决卡住问题
                 isRunning = false
                 broadcast(false, "已断开")
                 updateNotification("已断开")
@@ -106,7 +104,17 @@ class UdpMeshNetService : VpnService() {
     // =========================================================================
     private fun launchSession(cfg: UdpMeshConfig) {
         stopping.set(false)
-        thread(name = "UdpMesh-vpn-main") { runSession(cfg) }
+        // NAT 打洞就绪时，监听端口强制使用 NAT_PORT（10002），与 STUN 探测时绑定的端口一致
+        val effectiveCfg = if (NatPunchResult.isReady && cfg.role == UdpMeshRole.SERVER)
+            cfg.copy(listenPort = UdpNatPunch.NAT_PORT)
+        else cfg
+        // VPN 启动前先停止心跳，释放 10002 端口，避免与 VPN socket 冲突抢包
+        NatPunchResult.stopHeartbeat()
+        // 稍等端口完全释放后再启动 VPN socket
+        thread(name = "UdpMesh-vpn-main") {
+            Thread.sleep(300)
+            runSession(effectiveCfg)
+        }
     }
 
     private fun runSession(cfg: UdpMeshConfig) {
@@ -124,21 +132,48 @@ class UdpMeshNetService : VpnService() {
                 onHandshakeDone  = { localIp, peerIp ->
                     localVpnIp = localIp
                     peerVpnIp  = peerIp
-                    retryCount = 0  // 握手成功，重置重试计数
+                    retryCount = 0
+                    // VPN 隧道握手成功，NAT 映射已不再需要心跳维持
+                    NatPunchResult.stopHeartbeat()
                     thread(name = "UdpMesh-tun-setup") {
                         setupTunAndRoutes(cfg, localIp, peerIp)
                     }
                 },
                 onDisconnected   = { reason ->
-                    if (!stopping.get()) {
+                    if (!stopping.get() && cfg.role == UdpMeshRole.CLIENT) {
                         thread(name = "UdpMesh-disconnect") {
                             handleDisconnect(cfg, reason)
                         }
+                    } else if (cfg.role == UdpMeshRole.SERVER) {
+                        Log.i(TAG, "[服务端] 客户端断开，重新启动监听")
+                        if (!stopping.get()) {
+                            thread(name = "UdpMesh-restart") {
+                                Thread.sleep(1000)
+                                launchSession(cfg)
+                            }
+                        }
                     }
                 },
-                protectSocket    = { sock -> protect(sock) }
+                protectSocket    = { sock -> protect(sock) },
+                bindSocketToIface = { sock, ifaceName ->
+                    // 用 ConnectivityManager 找到接口对应的 Network 并绑定，
+                    // 强制 socket 从指定网卡出去，解决双接口 ACK 走错问题
+                    try {
+                        val cm = getSystemService(android.net.ConnectivityManager::class.java)
+                        val targetNetwork = cm?.allNetworks?.firstOrNull { network ->
+                            cm.getLinkProperties(network)?.interfaceName == ifaceName
+                        }
+                        if (targetNetwork != null) {
+                            targetNetwork.bindSocket(sock)
+                            Log.i(TAG, "[bindSocketToIface] socket 已绑定到网络接口 $ifaceName")
+                        } else {
+                            Log.w(TAG, "[bindSocketToIface] 未找到接口 $ifaceName 对应的 Network")
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "[bindSocketToIface] 绑定失败: ${e.message}")
+                    }
+                }
             )
-
             tunnel!!.start()
 
         } catch (e: Exception) {
@@ -169,7 +204,7 @@ class UdpMeshNetService : VpnService() {
         tunFd  = null
         tunWriteQueue.clear()
 
-        // 客户端自动重试逻辑
+        // 仅客户端执行自动重试逻辑，服务端不重试
         val shouldRetry = !stopping.get()
             && cfg.role == UdpMeshRole.CLIENT
             && cfg.maxRetryCount != 0
@@ -188,6 +223,7 @@ class UdpMeshNetService : VpnService() {
                 launchSession(cfg)
             }
         } else {
+            // 服务端或客户端不重试时，直接断开
             broadcast(false, reason)
             updateNotification("已断开")
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -195,6 +231,7 @@ class UdpMeshNetService : VpnService() {
         }
     }
 
+    // =========================================================================
     // =========================================================================
     // 握手完成后建立 TUN + 路由
     // =========================================================================
@@ -213,15 +250,26 @@ class UdpMeshNetService : VpnService() {
         setupRootRoutes(cfg, localIp, peerIp)
 
         isRunning = true
-        broadcast(true, "已连接：本机 $localIp ↔ 对端 $peerIp")
+        
+        // 构建互通网段信息
+        val msg = buildString {
+            append("已连接：本机 $localIp ↔ 对端 $peerIp")
+            if (myLanCidrList.isNotEmpty() || peerLanCidrList.isNotEmpty()) {
+                append("\n互通网段：")
+                if (myLanCidrList.isNotEmpty()) append("\n本端: ${myLanCidrList.joinToString()}")
+                if (peerLanCidrList.isNotEmpty()) append("\n对端: ${peerLanCidrList.joinToString()}")
+            }
+        }
+        broadcast(true, msg)
         updateNotification("已连接 | $localIp ↔ $peerIp")
 
         // 心跳 + 定期广播流量统计
+        // NAT 模式下每 5 秒发送一次心跳以维持映射，普通模式按配置间隔
         thread(name = "UdpMesh-keepalive") {
+            val heartbeatInterval = (cfg.keepaliveIntervalSec * 1000L).toLong()
             while (isRunning && !stopping.get()) {
-                Thread.sleep(cfg.keepaliveIntervalSec * 1000L)
+                Thread.sleep(heartbeatInterval)
                 tunnel?.sendKeepalive()
-                // 每个心跳周期广播一次流量统计
                 if (isRunning) broadcastStats()
             }
         }
@@ -344,9 +392,23 @@ class UdpMeshNetService : VpnService() {
         val cmds    = mutableListOf<String>()
         val cleanup = mutableListOf<String>()
         val tunIface  = "tun0"
-        val wlanIface = udpGetWlanIfaceName(cfg.tunnelIface)
+        // lanIface 非空时直接用，否则自动选（排除 tunnelIface）
+        val wlanIface = udpGetWlanIfaceName(tunnelIface = cfg.tunnelIface, lanIface = cfg.lanIface)
         val vpnSubnet = udpVpnSubnet(localIp, cfg.subnetMask)
         val vpnCidr   = udpCidrFromMask(cfg.subnetMask)
+        // 获取 wlanIface 的网关，用于 table local_network 路由
+        // 仅查 default via，不做 fallback 推算：
+        //   - 普通 WiFi 客户端接口有默认路由，可拿到网关
+        //   - 热点 AP / USB 共享接口本身就是网关，无 default 路由，直接用 scope link（via=null）即可
+        val wlanGateway = runCatching {
+            val proc = Runtime.getRuntime().exec(arrayOf("su", "-c",
+                "ip route show table all dev $wlanIface"))
+            val lines = proc.inputStream.bufferedReader().readLines()
+            proc.waitFor()
+            lines.firstOrNull { it.trimStart().startsWith("default") }
+                ?.let { Regex("via\\s+([\\d.]+)").find(it)?.groupValues?.get(1) }
+        }.getOrNull()
+        Log.d(TAG, "[setupRootRoutes] wlanIface=$wlanIface gateway=$wlanGateway")
 
         cmds += "sysctl -w net.ipv4.ip_forward=1"
         cmds += "sysctl -w net.ipv4.conf.all.rp_filter=0"
@@ -379,14 +441,24 @@ class UdpMeshNetService : VpnService() {
                 cleanup += "ip addr del $ip/32 dev $tunIface 2>/dev/null || true"
                 Log.d(TAG, "[setupRootRoutes] 绑定本端内网 IP $ip/32 到 $tunIface")
             }
-            cmds += "ip route del $net/$bits dev $wlanIface table local_network 2>/dev/null; ip route add $net/$bits dev $wlanIface table local_network 2>/dev/null || true"
+            // local_network 表：本端内网网段走 wlanIface（带网关，避免 scope link）
+            // 这条路由用于：从 tun0 收到对端发来的、目标为本端内网的包，路由到 wlan 出口转发给内网设备
+            cmds += "ip route del $net/$bits dev $wlanIface table local_network 2>/dev/null; ip route add $net/$bits ${if (wlanGateway != null) "via $wlanGateway " else ""}dev $wlanIface table local_network 2>/dev/null || true"
             cleanup += "ip route del $net/$bits dev $wlanIface table local_network 2>/dev/null || true"
+            // 让来自本端内网设备（热点/USB共享）的包查 local_network 表
+            // 优先级 19500，插在 Android 默认 local_network 规则（20000）之前
+            // local_network 表里有 peerLanCidrs via $peerIp dev tun0，内网设备访问对端内网的包会走 tun0
+            cmds += "ip rule del from $net/$bits iif $wlanIface lookup local_network priority 19500 2>/dev/null; ip rule add from $net/$bits iif $wlanIface lookup local_network priority 19500 2>/dev/null || true"
+            cleanup += "ip rule del from $net/$bits iif $wlanIface lookup local_network priority 19500 2>/dev/null || true"
             cmds += "iptables -A FORWARD -i $tunIface -o $wlanIface -d $cidr -j ACCEPT 2>/dev/null || true"
             cmds += "iptables -A FORWARD -i $wlanIface -o $tunIface -s $cidr -j ACCEPT 2>/dev/null || true"
             cleanup += "iptables -D FORWARD -i $tunIface -o $wlanIface -d $cidr -j ACCEPT 2>/dev/null || true"
             cleanup += "iptables -D FORWARD -i $wlanIface -o $tunIface -s $cidr -j ACCEPT 2>/dev/null || true"
             cmds += "iptables -t nat -A POSTROUTING -s $vpnSubnet/$vpnCidr -o $wlanIface -d $cidr -j MASQUERADE 2>/dev/null || true"
             cleanup += "iptables -t nat -D POSTROUTING -s $vpnSubnet/$vpnCidr -o $wlanIface -d $cidr -j MASQUERADE 2>/dev/null || true"
+            // 来自内网设备、出向 tun0 的包也需要 MASQUERADE，让对端看到的源 IP 是本机 VPN IP
+            cmds += "iptables -t nat -A POSTROUTING -s $net/$bits -o $tunIface -j MASQUERADE 2>/dev/null || true"
+            cleanup += "iptables -t nat -D POSTROUTING -s $net/$bits -o $tunIface -j MASQUERADE 2>/dev/null || true"
         }
 
         // 放行 tetherctrl_FORWARD 链
@@ -424,7 +496,21 @@ class UdpMeshNetService : VpnService() {
     }
 
     private fun runAsRoot(vararg cmds: String): Boolean = try {
-        val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", cmds.joinToString("\n")))
+        // iptables 在 SELinux Enforcing 下尝试通过 nsenter 进入 init network namespace 执行
+        // 若 nsenter 不可用（Permission denied），回退到直接 su -c iptables
+        val nsenterAvailable: Boolean by lazy {
+            runCatching {
+                val p = Runtime.getRuntime().exec(arrayOf("su", "-c", "nsenter -t 1 -n -- true"))
+                val err = p.errorStream.bufferedReader().readText()
+                p.waitFor()
+                !err.contains("Permission denied") && !err.contains("No such")
+            }.getOrDefault(false)
+        }
+        val processedCmds = cmds.map { cmd ->
+            val isIptables = cmd.trimStart().startsWith("iptables") || cmd.trimStart().startsWith("ip6tables")
+            if (isIptables && nsenterAvailable) "nsenter -t 1 -n -- $cmd" else cmd
+        }
+        val proc = Runtime.getRuntime().exec(arrayOf("su", "-c", processedCmds.joinToString("\n")))
         val out  = proc.inputStream.bufferedReader().readText()
         val err  = proc.errorStream.bufferedReader().readText()
         proc.waitFor()
@@ -452,6 +538,8 @@ class UdpMeshNetService : VpnService() {
             putExtra(EXTRA_TX_PACKETS,   t?.txPackets ?: 0L)
             putExtra(EXTRA_RX_PACKETS,   t?.rxPackets ?: 0L)
             putExtra(EXTRA_HANDSHAKE_MS, t?.lastHandshakeTimeMs ?: 0L)
+            putExtra(EXTRA_MY_LAN_CIDRS, myLanCidrList.joinToString(","))
+            putExtra(EXTRA_PEER_LAN_CIDRS, peerLanCidrList.joinToString(","))
             `package` = packageName
         }
         sendBroadcast(i)
@@ -520,30 +608,39 @@ fun stopUdpMeshVpn(context: android.content.Context) {
 }
 
 // ============================================================
-// 获取出口网络接口名
-// tunnelIface: 隧道绑定的接口名（如移动数据 rmnet），非空时内网接口优先选 wlan
+// 获取内网（LAN）出口接口名
+// lanIface:    用户显式指定的内网接口，非空时直接使用（最高优先级）
+// tunnelIface: 隧道出口接口名（如有 IPv6 的 wlan1 / rmnet_data0）
+//              指定后内网接口会排除隧道接口，优先选另一个 wlan
 // ============================================================
-fun udpGetWlanIfaceName(tunnelIface: String = ""): String = runCatching {
+fun udpGetWlanIfaceName(tunnelIface: String = "", lanIface: String = ""): String = runCatching {
+    // 用户直接指定了内网接口，直接返回（无需自动探测）
+    if (lanIface.isNotBlank()) return@runCatching lanIface
+
     val ifaces = java.net.NetworkInterface.getNetworkInterfaces()?.toList() ?: return@runCatching "wlan0"
-    // 如果隧道走移动数据接口，内网接口优先选 wlan
-    val preferWlan = tunnelIface.isNotBlank() &&
-        (tunnelIface.startsWith("rmnet") || tunnelIface.startsWith("ccmni") || tunnelIface.startsWith("v4-"))
-    if (preferWlan) {
-        ifaces.firstOrNull { iface ->
-            iface.isUp && !iface.isLoopback &&
-            (iface.name.startsWith("wlan") || iface.name.startsWith("swlan")) &&
-            iface.inetAddresses.toList().any { it is java.net.Inet4Address && !it.isLoopbackAddress }
-        }?.name?.let { return@runCatching it }
-    }
+    // 隧道接口非空时，内网接口必须排除隧道接口，避免两者冲突
+    val excludeIface = tunnelIface.trim()
+
+    // 优先：wlan 类接口（且不是隧道接口）有 IPv4
     ifaces.firstOrNull { iface ->
         iface.isUp && !iface.isLoopback &&
+        iface.name != excludeIface &&
+        (iface.name.startsWith("wlan") || iface.name.startsWith("swlan") || iface.name.startsWith("eth")) &&
+        iface.inetAddresses.toList().any { it is java.net.Inet4Address && !it.isLoopbackAddress }
+    }?.name
+    // 次选：任意非 tun/dummy/rmnet/隧道接口有 IPv4
+    ?: ifaces.firstOrNull { iface ->
+        iface.isUp && !iface.isLoopback &&
+        iface.name != excludeIface &&
         !iface.name.startsWith("tun") &&
         !iface.name.startsWith("dummy") &&
         !iface.name.startsWith("rmnet") &&
         iface.inetAddresses.toList().any { it is java.net.Inet4Address && !it.isLoopbackAddress }
     }?.name
+    // 兜底：rmnet（移动数据）
     ?: ifaces.firstOrNull { iface ->
         iface.isUp && !iface.isLoopback &&
+        iface.name != excludeIface &&
         iface.name.startsWith("rmnet") &&
         iface.inetAddresses.toList().any { it is java.net.Inet4Address && !it.isLoopbackAddress }
     }?.name
