@@ -552,8 +552,8 @@ private fun UdpMeshServerSetupScreen(
                 onClick = {
                     fetchingIp = true; fetchMsg = "获取中…"
                     scope.launch {
-                        val v4 = withContext(Dispatchers.IO) { meshFetchPublicIp("https://v4.ipip.net/") }
-                        val v6 = withContext(Dispatchers.IO) { meshFetchPublicIp("https://v6.ipip.net/") }
+                        val v4: String? = withContext(Dispatchers.IO) { meshFetchPublicIp("https://v4.ipip.net/") }
+                        val v6: String? = withContext(Dispatchers.IO) { meshFetchPublicIp("https://v6.ipip.net/") }
                         if (v4 != null) publicIpv4 = v4
                         if (v6 != null) publicIpv6 = v6
                         fetchMsg = when {
@@ -2325,6 +2325,18 @@ fun UdpMeshNatPunchScreen(
 // ============================================================
 // 工具函数
 // ============================================================
+
+/** 通过 HTTP GET 获取公网 IP，返回纯 IP 字符串，失败返回 null */
+private fun meshFetchPublicIp(url: String): String? = runCatching {
+    val conn = java.net.URL(url).openConnection() as java.net.HttpURLConnection
+    conn.connectTimeout = 5000
+    conn.readTimeout = 5000
+    conn.connect()
+    val body = conn.inputStream.bufferedReader().readText().trim()
+    conn.disconnect()
+    // 只保留 IP 部分（某些接口会返回带换行或额外文字）
+    body.lines().firstOrNull { it.contains('.') || it.contains(':') }?.trim()
+}.getOrNull()
 
 /** 检测设备是否有可用的 root 权限（su 可执行且返回 uid=0）*/
 private fun udpCheckRoot(): Boolean = runCatching {

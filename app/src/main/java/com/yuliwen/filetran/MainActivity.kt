@@ -1,4 +1,4 @@
-﻿package com.yuliwen.filetran
+package com.yuliwen.filetran
 
 import android.Manifest
 import android.app.Activity
@@ -1246,7 +1246,6 @@ fun TransferLabScreen(
     onSecondaryPageChanged: (Boolean) -> Unit = {}
 ) {
     var showNatTypeDetect by rememberSaveable { mutableStateOf(false) }
-    var showNat34Punch by rememberSaveable { mutableStateOf(false) }
     var showIpv4Stun by rememberSaveable { mutableStateOf(false) }
     var showIpv6Enhanced by rememberSaveable { mutableStateOf(false) }
     var showUdpFileExperiment by rememberSaveable { mutableStateOf(false) }
@@ -1258,12 +1257,9 @@ fun TransferLabScreen(
     var showSstv by rememberSaveable { mutableStateOf(false) }
     var showNfc by rememberSaveable { mutableStateOf(false) }
     var showCimbar by rememberSaveable { mutableStateOf(false) }
-    var showWireGuard by rememberSaveable { mutableStateOf(false) }
-    var showMeshNet by rememberSaveable { mutableStateOf(false) }
     var showUdpMeshNet by rememberSaveable { mutableStateOf(false) }
     val isSecondaryPageOpen =
         showNatTypeDetect ||
-            showNat34Punch ||
             showIpv4Stun ||
             showIpv6Enhanced ||
             showUdpFileExperiment ||
@@ -1275,8 +1271,6 @@ fun TransferLabScreen(
             showSstv ||
             showNfc ||
             showCimbar ||
-            showWireGuard ||
-            showMeshNet ||
             showUdpMeshNet
     LaunchedEffect(isSecondaryPageOpen) {
         onSecondaryPageChanged(isSecondaryPageOpen)
@@ -1288,10 +1282,6 @@ fun TransferLabScreen(
     }
     if (showNatTypeDetect) {
         NatTypeDetectScreen(onBack = { showNatTypeDetect = false })
-        return
-    }
-    if (showNat34Punch) {
-        Nat34UdpPunchScreen(onBack = { showNat34Punch = false })
         return
     }
     if (showIpv4Stun) {
@@ -1338,14 +1328,6 @@ fun TransferLabScreen(
         CimbarTransferScreen(onBack = { showCimbar = false })
         return
     }
-    if (showWireGuard) {
-        WireGuardVpnScreen(onBack = { showWireGuard = false })
-        return
-    }
-    if (showMeshNet) {
-        MeshNetScreen(onBack = { showMeshNet = false })
-        return
-    }
     if (showUdpMeshNet) {
         UdpMeshNetScreen(onBack = { showUdpMeshNet = false })
         return
@@ -1364,6 +1346,59 @@ fun TransferLabScreen(
             fontSize = 14.sp,
             color = MaterialTheme.colorScheme.onBackground.copy(alpha = 0.7f)
         )
+
+        // ── 异地组网（顶部独立分组，突出显示）──
+        Text(
+            text = "异地组网",
+            fontSize = 18.sp,
+            color = MaterialTheme.colorScheme.primary,
+            fontWeight = FontWeight.Bold
+        )
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.primaryContainer
+            ),
+            shape = RoundedCornerShape(20.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(0.dp)
+            ) {
+                Text(
+                    text = "基于 UDP 打洞的跨网络组网方案，可穿透 NAT 实现异地设备互联。",
+                    fontSize = 13.sp,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                )
+                Spacer(Modifier.height(14.dp))
+                Button(
+                    onClick = { showUdpMeshNet = true },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(60.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Wifi,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp)
+                    )
+                    Spacer(Modifier.width(10.dp))
+                    Text(
+                        "异地组网 (FileTran Over UDP)",
+                        fontSize = 17.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
+        Spacer(Modifier.height(4.dp))
+
         Text(
             text = "打流&测速",
             fontSize = 13.sp,
@@ -1444,33 +1479,6 @@ fun TransferLabScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text("IPv6打洞验证")
-                }
-                OutlinedButton(
-                    onClick = { showMeshNet = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("异地组网 (FileTran)")
-                }
-                OutlinedButton(
-                    onClick = { showUdpMeshNet = true },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(
-                        Icons.Default.Wifi,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp)
-                    )
-                    Spacer(Modifier.width(6.dp))
-                    Text("异地组网 (FileTran Over UDP)", fontWeight = FontWeight.SemiBold)
-                }
-                OutlinedButton(
-                    onClick = { showWireGuard = true },
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("异地组网 (WireGuard)")
                 }
             }
         }
